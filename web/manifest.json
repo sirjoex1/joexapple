@@ -1,11 +1,11 @@
 {
-    "name": "JOEX VIP",
-    "short_name": "JOEX VIP",
+    "name": "JoeX PRO",
+    "short_name": "JoeX PRO",
     "start_url": ".",
     "display": "standalone",
-    "background_color": "#0175C2",
-    "theme_color": "#0175C2",
-    "description": "JOEX VIP",
+    "background_color": "#050706",
+    "theme_color": "#0C3B28",
+    "description": "JoeX PRO",
     "orientation": "portrait-primary",
     "prefer_related_applications": false,
     "icons": [

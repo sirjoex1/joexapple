@@ -5,7 +5,7 @@ plugins {
 }
 
 android {
-    namespace = "com.joex.vip.app"
+    namespace = "com.jooex.apple"
     compileSdk = flutter.compileSdkVersion
     ndkVersion = flutter.ndkVersion
 
@@ -16,7 +16,7 @@ android {
 
     defaultConfig {
         // TODO: Specify your own unique Application ID (https://developer.android.com/studio/build/application-id.html).
-        applicationId = "com.joex.vip.app"
+        applicationId = "com.jooex.apple"
         // You can update the following values to match your application needs.
         // For more information, see: https://flutter.dev/to/review-gradle-config.
         minSdk = flutter.minSdkVersion
@@ -30,6 +30,24 @@ android {
             // TODO: Add your own signing config for the release build.
             // Signing with the debug keys for now, so `flutter run --release` works.
             signingConfig = signingConfigs.getByName("debug")
+
+            // Size reduction: strip unused Java/Kotlin code and Android resources.
+            isMinifyEnabled = true
+            isShrinkResources = true
+            proguardFiles(
+                getDefaultProguardFile("proguard-android-optimize.txt"),
+                "proguard-rules.pro"
+            )
+        }
+    }
+
+    packaging {
+        jniLibs {
+            // ضغط المكتبات داخل الـ APK — يقلل حجم التحميل بشكل كبير
+            useLegacyPackaging = true
+        }
+        resources {
+            excludes += setOf("META-INF/*.version", "META-INF/*.kotlin_module", "DebugProbesKt.bin")
         }
     }
 }

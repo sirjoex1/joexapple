@@ -47,3 +47,9 @@ app.*.map.json
 # Exclude accidentally copied JDK
 **/oracleJdk-26/
 
+
+*.hprof
+*.apk
+*.tar.gz
+android/*.hprof
+

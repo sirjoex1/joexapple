@@ -1,1504 +1,2901 @@
-import 'dart:async';
 import 'dart:math' as math;
-import 'dart:ui';
+import 'dart:ui' as ui;
+
 import 'package:flutter/material.dart';
-import 'package:url_launcher/url_launcher.dart';
+import 'package:flutter/services.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
-// ─────────────────────────────────────────────
-// CONSTANTS
-// ─────────────────────────────────────────────
-const _kBlack = Color(0xFF080808);
-const _kPurple = Color(0xFF7C3AED);
-const _kPurpleDark = Color(0xFF4A1D96);
-const _kPurpleMid = Color(0xFF2D1B69);
-const _kPanelBg = Color(0xFF0D0B14);
-const _kSubText = Color(0xFF5A4A8A);
-const _kDimText = Color(0xFF3A3A4A);
-const _kLineColor = Color(0xFF1A1530);
+import '../design/design_system.dart';
+import '../design/identity.dart';
+import '../services/dynamic_link_service.dart';
+import '../services/links.dart';
+import '../widgets/ios_loading_dialog.dart';
 
-// ─────────────────────────────────────────────
-// MAIN WIDGET
-// ─────────────────────────────────────────────
-class JoeXLoginPage extends StatefulWidget {
-  final VoidCallback onComplete;
+/// شاشات الدخول: الحساب، وطريقة فتح الحساب (الموقع او التطبيق)، ثم التفعيل
+enum _Ob { account, register, activate }
 
-  const JoeXLoginPage({super.key, required this.onComplete});
+/// طريقة فتح الحساب في المنصة
+enum _Method { web, app }
+
+// ─────────────────────────────────────────────────────────────
+// تسجيل الدخول — هيكل مشروع gpt على خلفية سوداء سادة
+// فوق رأس ثابت: الرجوع، و«مساعدة» واللغة، ثم شريط الخطوات: الحساب ثم
+// التفعيل ثم الوصول الى الاداة. بلا صورة ولا شعار.
+//   الحساب: المنصات اولا (كل منصة تلوّن التطبيق بلونها)، ثم كارت افتح حسابك،
+//           ثم رسمة فورم التسجيل وخطواتها الاربع، واتفاقية المستخدم. تحت: الازرق
+//           «بالفعل سجّلت» يذهب الى التفعيل مباشرة، و«افتح حسابًا برمز الترويج»
+//           بالاطار ينسخ الرمز ويفتح التسجيل ثم يصير «سجّلت».
+//   التفعيل: معرّف الحساب والكود والقناتان، ورسمة مكان رقم الحساب، ثم
+//            «تسجيل الدخول» كما كان: الكود joe27 ثم الاشتراك الاجباري.
+// ─────────────────────────────────────────────────────────────
+class LoginScreen extends StatefulWidget {
+  final VoidCallback onLoginComplete;
+
+  /// الاستهلال ما زال فوقها: الدخول ينتظر ذهابه
+  final bool heroVisible;
+
+  const LoginScreen({
+    super.key,
+    required this.onLoginComplete,
+    this.heroVisible = true,
+  });
 
   @override
-  State<JoeXLoginPage> createState() => _JoeXLoginPageState();
+  State<LoginScreen> createState() => _LoginScreenState();
 }
 
-class _JoeXLoginPageState extends State<JoeXLoginPage>
-    with TickerProviderStateMixin {
-  // ── Controllers ──────────────────────────────
-  late AnimationController _shakeController;
-  late AnimationController _loginLoadingController;
-  late AnimationController _entryController;
+class _LoginScreenState extends State<LoginScreen>
+    with SingleTickerProviderStateMixin {
+  late final AnimationController _enter = AnimationController(
+    vsync: this,
+    duration: const Duration(milliseconds: 1100),
+  );
 
   final TextEditingController _idController = TextEditingController();
-  final TextEditingController _promoController = TextEditingController();
+  final TextEditingController _codeController = TextEditingController(); // kept for saved data
   final FocusNode _idFocusNode = FocusNode();
-  final FocusNode _promoFocusNode = FocusNode();
+  final FocusNode _codeFocusNode = FocusNode();
+  final ScrollController _scroll = ScrollController();
 
-  // ── State ─────────────────────────────────────
-  bool _hasPromoError = false;
-  bool _isLoggingIn = false;
-  int _selectedPlatform = 0; // 0: Melbet, 1: Linebet, 2: 1Xbet
-  double _buttonScale = 1.0;
+  _Ob _screen = _Ob.account;
 
-  // ── Entry animations ─────────────────────────
-  late Animation<double> _bgFade;
-  late Animation<Offset> _identitySlide;
-  late Animation<double> _identityFade;
-  late Animation<Offset> _panelSlide;
-  late Animation<double> _panelFade;
+  /// طريقة التسجيل المختارة في صفحة «افتح حسابك»
+  _Method _method = _Method.web;
 
-  // Staggered field & button animations
-  late Animation<double> _field1Fade;
-  late Animation<double> _field2Fade;
-  late Animation<double> _platformFade;
-  late Animation<double> _buttonFade;
+  /// نُسخ الرمز في طريقة التطبيق: الزر صار «سجّلت»
+  bool _appCopied = false;
+
+  /// فُتح رابط التسجيل: الزر صار «سجّلت»
+  bool _regOpened = false;
+
+  /// الحساب مر من الخطوة الاولى
+  bool _accountDone = false;
+
+  String? _idError;
+  String? _codeError; // ignore: unused_field
+  bool _isSubmitting = false;
+  bool _started = false;
+
+  int _idShake = 0;
+  final int _codeShake = 0; // ignore: unused_field
 
   @override
   void initState() {
     super.initState();
-
-    _shakeController = AnimationController(
-      vsync: this,
-      duration: const Duration(milliseconds: 650),
-    );
-
-    _loginLoadingController = AnimationController(
-      vsync: this,
-      duration: const Duration(seconds: 2),
-    );
-
-    // Entry animation — 1600ms total
-    _entryController = AnimationController(
-      vsync: this,
-      duration: const Duration(milliseconds: 1600),
-    );
-
-    // Background fade 0–400ms
-    _bgFade = Tween<double>(begin: 0.0, end: 1.0).animate(
-      CurvedAnimation(
-        parent: _entryController,
-        curve: const Interval(0.0, 0.25, curve: Curves.easeOut),
-      ),
-    );
-
-    // Identity section slides down 200–700ms
-    _identitySlide = Tween<Offset>(
-      begin: const Offset(0, -0.5),
-      end: Offset.zero,
-    ).animate(CurvedAnimation(
-      parent: _entryController,
-      curve: const Interval(0.12, 0.44, curve: Curves.easeOutCubic),
-    ));
-    _identityFade = Tween<double>(begin: 0.0, end: 1.0).animate(
-      CurvedAnimation(
-        parent: _entryController,
-        curve: const Interval(0.12, 0.44, curve: Curves.easeOut),
-      ),
-    );
-
-    // Glass panel slides up 300–900ms
-    _panelSlide = Tween<Offset>(
-      begin: const Offset(0, 0.3),
-      end: Offset.zero,
-    ).animate(CurvedAnimation(
-      parent: _entryController,
-      curve: const Interval(0.19, 0.56, curve: Curves.easeOutCubic),
-    ));
-    _panelFade = Tween<double>(begin: 0.0, end: 1.0).animate(
-      CurvedAnimation(
-        parent: _entryController,
-        curve: const Interval(0.19, 0.50, curve: Curves.easeOut),
-      ),
-    );
-
-    // Staggered: field1 0.50→0.65, field2 0.60→0.75, platform 0.70→0.85, button 0.80→1.0
-    _field1Fade = Tween<double>(begin: 0.0, end: 1.0).animate(
-      CurvedAnimation(
-        parent: _entryController,
-        curve: const Interval(0.50, 0.68, curve: Curves.easeOut),
-      ),
-    );
-    _field2Fade = Tween<double>(begin: 0.0, end: 1.0).animate(
-      CurvedAnimation(
-        parent: _entryController,
-        curve: const Interval(0.58, 0.76, curve: Curves.easeOut),
-      ),
-    );
-    _platformFade = Tween<double>(begin: 0.0, end: 1.0).animate(
-      CurvedAnimation(
-        parent: _entryController,
-        curve: const Interval(0.68, 0.86, curve: Curves.easeOut),
-      ),
-    );
-    _buttonFade = Tween<double>(begin: 0.0, end: 1.0).animate(
-      CurvedAnimation(
-        parent: _entryController,
-        curve: const Interval(0.78, 1.0, curve: Curves.easeOut),
-      ),
-    );
-
     _idFocusNode.addListener(() => setState(() {}));
-    _promoFocusNode.addListener(() {
-      setState(() {
-        if (_promoFocusNode.hasFocus) _hasPromoError = false;
-      });
-    });
+    _codeFocusNode.addListener(() => setState(() {}));
+    _idController.addListener(() => setState(() {}));
+    _codeController.addListener(() => setState(() {}));
+    _loadSaved();
+  }
 
-    // Start entry animation
-    _entryController.forward();
+  @override
+  void didChangeDependencies() {
+    super.didChangeDependencies();
+    if (_started) return;
+    _started = true;
+    if (!motionAllowed(context)) {
+      _enter.value = 1;
+    } else if (widget.heroVisible) {
+      _enter.forward();
+    }
+    // صور المنصات تُحمّل مبكرا حتى لا تظهر خاناتها فارغة لحظة الدخول
+    if (!isWidgetTest) {
+      for (final p in Platform.values) {
+        precacheImage(AssetImage(p.asset), context);
+      }
+    }
+  }
+
+  @override
+  void didUpdateWidget(covariant LoginScreen old) {
+    super.didUpdateWidget(old);
+    // ذهب الاستهلال: تدخل الصفحة
+    if (!old.heroVisible && widget.heroVisible && _enter.value == 0) {
+      motionAllowed(context) ? _enter.forward() : _enter.value = 1;
+    }
+  }
+
+  Future<void> _loadSaved() async {
+    final prefs = await SharedPreferences.getInstance();
+    final savedId = prefs.getString('user_id') ?? '';
+    final savedCode = prefs.getString('app_code') ?? '';
+    if (!mounted) return;
+    setState(() {
+      if (savedId.isNotEmpty) _idController.text = savedId;
+      if (savedCode.isNotEmpty) _codeController.text = savedCode;
+    });
   }
 
   @override
   void dispose() {
-    _shakeController.dispose();
-    _loginLoadingController.dispose();
-    _entryController.dispose();
+    _enter.dispose();
     _idController.dispose();
-    _promoController.dispose();
+    _codeController.dispose();
     _idFocusNode.dispose();
-    _promoFocusNode.dispose();
+    _codeFocusNode.dispose();
+    _scroll.dispose();
     super.dispose();
   }
 
-  // ── Logic ─────────────────────────────────────
-  void _attemptLogin() {
-    if (_isLoggingIn) return;
+  bool get _s2 => _idController.text.trim().isNotEmpty;
+  bool get _s3 => _codeController.text.trim().isNotEmpty; // ignore: unused_element
+
+  _Ob? get _backTo => switch (_screen) {
+    _Ob.account => null,
+    _Ob.register => _Ob.account,
+    _Ob.activate => _Ob.account,
+  };
+
+  void _go(_Ob s) {
+    FocusScope.of(context).unfocus();
+    setState(() {
+      if (s == _Ob.activate) _accountDone = true;
+      _screen = s;
+      _idError = null;
+      _codeError = null;
+    });
+    if (_scroll.hasClients) _scroll.jumpTo(0);
+  }
+
+  void _back() {
+    final to = _backTo;
+    if (to != null) _go(to);
+  }
+
+  /// الموقع: ينسخ الرمز ويفتح موقع التسجيل، وبعدها «سجّلت» الى التفعيل
+  Future<void> _openSite() async {
+    if (_regOpened) {
+      _go(_Ob.activate);
+      return;
+    }
+    setState(() => _regOpened = true);
+    await _copyPromo();
+    await openUrl(kRegLink);
+  }
+
+  /// التطبيق: ينسخ الرمز ليلصقه في تطبيق المنصة، وبعدها «سجّلت» الى التفعيل
+  Future<void> _copyForApp() async {
+    if (_appCopied) {
+      _go(_Ob.activate);
+      return;
+    }
+    setState(() => _appCopied = true);
+    await _copyPromo();
+  }
+
+  void _pickMethod(_Method m) {
+    if (m == _method) return;
+    setState(() => _method = m);
+  }
+
+  Future<void> _copyPromo() async {
+    try {
+      await Clipboard.setData(const ClipboardData(text: kPromoCode));
+      _toast(tr('تم نسخ رمز الترويج', 'Promo code copied'));
+    } catch (_) {
+      _toast(tr('انسخ الرمز يدويًا: joe27', 'Copy the code by hand: joe27'));
+    }
+  }
+
+  void _toast(String msg) {
+    if (!mounted) return;
+    final m = ScaffoldMessenger.maybeOf(context);
+    if (m == null) return;
+    m.hideCurrentSnackBar();
+    // فوق تحت الرأس مثل gpt، لا تحت فتغطي الزرين
+    final mq = MediaQuery.of(context);
+    final bottom = math.max(
+      16.0,
+      mq.size.height - mq.viewInsets.bottom - mq.padding.top - 150,
+    );
+    m.showSnackBar(
+      SnackBar(
+        behavior: SnackBarBehavior.floating,
+        margin: EdgeInsets.fromLTRB(28, 0, 28, bottom),
+        backgroundColor: kCoalHi,
+        duration: const Duration(milliseconds: 2200),
+        shape: RoundedRectangleBorder(
+          borderRadius: BorderRadius.circular(99),
+          side: BorderSide(color: kEmerald.withValues(alpha: 0.5)),
+        ),
+        content: Text(
+          msg,
+          textAlign: TextAlign.center,
+          style: bodyText(kWhite, 13, weight: FontWeight.w600),
+        ),
+      ),
+    );
+  }
+
+  void _submit() async {
+    if (_isSubmitting) return;
     final id = _idController.text.trim();
-    final promo = _promoController.text.trim();
+
+    setState(() {
+      _idError = null;
+      _codeError = null;
+    });
 
     if (id.isEmpty) {
-      ScaffoldMessenger.of(context).showSnackBar(SnackBar(
-        content: const Text("الرجاء إدخال معرف الحساب ID",
-            textAlign: TextAlign.right),
-        backgroundColor: Colors.redAccent.withValues(alpha: 0.85),
-        behavior: SnackBarBehavior.floating,
-        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
-      ));
+      setState(() {
+        _idError = tr('يرجى إدخال معرف الحساب', 'Please enter your account ID');
+        _idShake++;
+      });
+      _idFocusNode.requestFocus();
       return;
     }
 
-    setState(() => _isLoggingIn = true);
+    FocusScope.of(context).unfocus();
+    setState(() => _isSubmitting = true);
+    IosLoadingDialog.show(
+      context: context,
+    );
+    await Future<void>.delayed(const Duration(milliseconds: 750));
 
-    _loginLoadingController.forward(from: 0.0).then((_) {
-      if (promo == "joe27") {
-        setState(() {
-          _isLoggingIn = false;
-          _hasPromoError = false;
-        });
-        _showSubscriptionDialog();
-      } else {
-        setState(() {
-          _isLoggingIn = false;
-          _hasPromoError = true;
-        });
-        _shakeController.forward(from: 0.0);
-        _showInvalidPromoDialog();
-      }
-    });
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setBool('is_logged_in', true);
+    await prefs.setString('user_id', id);
+    await prefs.setInt(AppPrefs.platformKey, AppPrefs.instance.platform.index);
+
+    if (!mounted) return;
+    IosLoadingDialog.hide(context);
+    setState(() => _isSubmitting = false);
+
+    final hasSub = prefs.getBool('has_completed_subscription') ?? false;
+
+    if (!hasSub) {
+      _showMandatorySubscriptionDialog(prefs);
+    } else {
+      widget.onLoginComplete();
+    }
   }
 
-  // ── Dialogs ────────────────────────────────────
-  void _showInvalidPromoDialog() {
-    String platformName = _selectedPlatform == 0
-        ? "Melbet"
-        : _selectedPlatform == 1
-            ? "Linebet"
-            : "1Xbet";
+  void _showMandatorySubscriptionDialog(SharedPreferences prefs) {
+    MandatorySubscriptionDialog.show(
+      context,
+      onSubscriptionVerified: () async {
+        await prefs.setBool('has_completed_subscription', true);
+        if (!mounted) return;
+        widget.onLoginComplete();
+      },
+    );
+  }
 
-    showGeneralDialog(
-      context: context,
-      barrierDismissible: true,
-      barrierLabel: "InvalidPromoDialog",
-      transitionDuration: const Duration(milliseconds: 250),
-      pageBuilder: (context, anim1, anim2) => const SizedBox.shrink(),
-      transitionBuilder: (context, anim1, anim2, child) {
-        final scale = Tween<double>(begin: 0.95, end: 1.0)
-            .animate(CurvedAnimation(parent: anim1, curve: Curves.easeOut));
-        final opacity =
-            Tween<double>(begin: 0.0, end: 1.0).animate(anim1);
-        return ScaleTransition(
-          scale: scale,
-          child: FadeTransition(
-            opacity: opacity,
-            child: Center(
-              child: Material(
-                color: Colors.transparent,
-                child: ClipRRect(
-                  borderRadius: BorderRadius.circular(16),
-                  child: Container(
-                    width: MediaQuery.of(context).size.width * 0.88,
-                    padding: const EdgeInsets.all(24),
-                    decoration: BoxDecoration(
-                      color: const Color(0xFF141418),
-                      border:
-                          Border.all(color: const Color(0xFF2A2A35), width: 1.0),
-                    ),
-                    child: Column(
-                      mainAxisSize: MainAxisSize.min,
-                      crossAxisAlignment: CrossAxisAlignment.stretch,
-                      children: [
-                        Row(
-                          mainAxisAlignment: MainAxisAlignment.end,
-                          children: [
-                            const Text("ERROR: GATEWAY_BLOCKED",
-                                style: TextStyle(
-                                  fontFamily: 'monospace',
-                                  color: _kPurple,
-                                  fontSize: 11,
-                                  fontWeight: FontWeight.bold,
-                                )),
-                            const SizedBox(width: 8),
-                            const Icon(Icons.gpp_bad_outlined,
-                                color: _kPurple, size: 16),
-                          ],
-                        ),
-                        const Divider(color: Color(0xFF2A2A35), height: 20),
-                        const SizedBox(height: 8),
-                        const Text(
-                          "البرومو كود المدخل غير نشط حالياً للربط بالخادم الموحد.",
-                          style: TextStyle(
-                              color: Colors.white,
-                              fontSize: 14,
-                              fontWeight: FontWeight.bold),
-                          textAlign: TextAlign.right,
-                        ),
-                        const SizedBox(height: 16),
-                        Container(
-                          padding: const EdgeInsets.all(14),
-                          decoration: BoxDecoration(
-                            color: Colors.black.withValues(alpha: 0.3),
-                            borderRadius: BorderRadius.circular(12),
-                            border: Border.all(color: const Color(0xFF2A2A35)),
+  // ═══════════════════════════════════════════════════════════
+  @override
+  Widget build(BuildContext context) {
+    final media = MediaQuery.of(context);
+    final size = media.size;
+    final side = size.width < 360 ? 14.0 : 18.0;
+    final content = math.min(size.width - side * 2, 460.0);
+    final bar = _ctaBar(content);
+
+    return PopScope(
+      canPop: _backTo == null,
+      onPopInvokedWithResult: (didPop, _) {
+        if (!didPop) _back();
+      },
+      child: Scaffold(
+        // اسود سادة: بلا صورة ولا فيديو
+        backgroundColor: Colors.black,
+        resizeToAvoidBottomInset: true,
+        body: Directionality(
+          textDirection: appDir,
+          child: Stack(
+            fit: StackFit.expand,
+            children: [
+              Column(
+                crossAxisAlignment: CrossAxisAlignment.stretch,
+                children: [
+                  // رأس ثابت مثل gpt: الرجوع على البداية، والمساعدة واللغة على
+                  // النهاية، وتحتها شريط الخطوات ثم خط فاصل. بلا صورة ولا شعار
+                  Entrance(
+                    parent: _enter,
+                    begin: 0,
+                    end: 0.5,
+                    dy: -12,
+                    child: DecoratedBox(
+                      decoration: BoxDecoration(
+                        color: Colors.black,
+                        border: Border(
+                          bottom: BorderSide(
+                            color: kWhite.withValues(alpha: 0.08),
                           ),
-                          child: RichText(
-                            textAlign: TextAlign.right,
-                            text: TextSpan(
-                              style: const TextStyle(
-                                fontFamily: 'monospace',
-                                color: Color(0xFF8E8E93),
-                                fontSize: 11,
-                                height: 1.5,
-                              ),
+                        ),
+                      ),
+                      child: Padding(
+                        padding: EdgeInsets.fromLTRB(
+                          14,
+                          media.padding.top + 10,
+                          14,
+                          12,
+                        ),
+                        child: Center(
+                          child: SizedBox(
+                            width: content,
+                            child: Column(
+                              crossAxisAlignment: CrossAxisAlignment.stretch,
                               children: [
-                                const TextSpan(
-                                    text:
-                                        "لتفعيل نظام الأمان وفك تشفير إشارات الخانات السليمة، يجب ربط الحساب بالبرومو كود المعتمد:\n\n"),
-                                const TextSpan(
-                                    text: "1️⃣ أنشئ حساباً جديداً تماماً على منصة "),
-                                TextSpan(
-                                    text: "$platformName\n",
-                                    style: const TextStyle(
-                                        color: _kPurple,
-                                        fontWeight: FontWeight.bold)),
-                                const TextSpan(
-                                    text:
-                                        "2️⃣ أدخل كود التفعيل المعتمد أثناء التسجيل: "),
-                                const TextSpan(
-                                    text: "joe27\n\n",
-                                    style: TextStyle(
-                                        color: Colors.white,
-                                        fontWeight: FontWeight.bold,
-                                        fontSize: 13)),
-                                const TextSpan(
-                                    text:
-                                        "⚠️ تنبيه: نظام حماية خادم التشفير يرفض الاتصالات العشوائية ويمنع تزوير الإشارات.",
-                                    style: TextStyle(
-                                        color: Color(0xFF5A5A6E), fontSize: 10)),
+                                SizedBox(
+                                  height: 42,
+                                  child: Row(
+                                    children: [
+                                      AnimatedSwitcher(
+                                        duration: Motion.medium,
+                                        child: _backTo == null
+                                            ? const SizedBox(
+                                                key: ValueKey('none'),
+                                              )
+                                            : Padding(
+                                                key: const ValueKey('back'),
+                                                padding:
+                                                    const EdgeInsetsDirectional.only(
+                                                      end: 6,
+                                                    ),
+                                                child: _RoundIcon(
+                                                  key: const ValueKey(
+                                                    'login-back',
+                                                  ),
+                                                  icon:
+                                                      Icons.arrow_back_rounded,
+                                                  label: tr('رجوع', 'Back'),
+                                                  onTap: _back,
+                                                ),
+                                              ),
+                                      ),
+                                      // على الجنب: الدعم ثم قناتانا، ايقونات فقط
+                                      IconLink(
+                                        key: const ValueKey('support-btn'),
+                                        icon: Icons.support_agent_rounded,
+                                        color: kEmerald,
+                                        label: tr('الدعم', 'Support'),
+                                        onTap: () => openUrl(kHelpLink),
+                                      ),
+                                      const SizedBox(width: 6),
+                                      IconLink(
+                                        key: const ValueKey('channel-telegram'),
+                                        icon: Icons.telegram,
+                                        color: const Color(0xFF29A9EB),
+                                        label: tr(
+                                          'قناة التليجرام',
+                                          'Telegram channel',
+                                        ),
+                                        onTap: () => openUrl(kTelegramUrl),
+                                      ),
+                                      const SizedBox(width: 6),
+                                      IconLink(
+                                        key: const ValueKey('channel-youtube'),
+                                        icon: Icons.smart_display_rounded,
+                                        color: const Color(0xFFFF2D2D),
+                                        label: tr(
+                                          'قناة اليوتيوب',
+                                          'YouTube channel',
+                                        ),
+                                        onTap: () => openUrl(kYoutubeUrl),
+                                      ),
+                                      // اللغة على النهاية تاخذ ما بقي كله،
+                                      // وتقص نصها بنقاط حين تضيق الشاشة
+                                      const SizedBox(width: 8),
+                                      const Expanded(
+                                        child: Align(
+                                          alignment:
+                                              AlignmentDirectional.centerEnd,
+                                          child: LangToggle(),
+                                        ),
+                                      ),
+                                    ],
+                                  ),
+                                ),
+                                Padding(
+                                  padding: const EdgeInsets.only(top: 12),
+                                  child: _StepsBar(
+                                    current: _screen == _Ob.activate ? 1 : 0,
+                                    accountDone: _accountDone,
+                                  ),
+                                ),
                               ],
                             ),
                           ),
                         ),
-                        const SizedBox(height: 20),
-                        GestureDetector(
-                          onTap: () => Navigator.pop(context),
-                          child: Container(
-                            height: 48,
-                            decoration: BoxDecoration(
-                              borderRadius: BorderRadius.circular(12),
-                              gradient: const LinearGradient(
-                                colors: [_kPurpleDark, _kPurple],
-                                begin: Alignment.centerLeft,
-                                end: Alignment.centerRight,
+                      ),
+                    ),
+                  ),
+                  Expanded(
+                    child: SingleChildScrollView(
+                      controller: _scroll,
+                      physics: const ClampingScrollPhysics(),
+                      padding: const EdgeInsets.only(top: 16, bottom: 18),
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.stretch,
+                        children: [
+                          Center(
+                            child: SizedBox(
+                              width: content,
+                              child: Entrance(
+                                parent: _enter,
+                                begin: 0.18,
+                                end: 0.8,
+                                dy: 36,
+                                child: Column(
+                                  crossAxisAlignment:
+                                      CrossAxisAlignment.stretch,
+                                  children: [
+                                    AnimatedSwitcher(
+                                      duration: Motion.slow,
+                                      switchInCurve: Motion.emphasized,
+                                      switchOutCurve: Motion.standard,
+                                      transitionBuilder: (child, a) =>
+                                          FadeTransition(
+                                            opacity: a,
+                                            child: SlideTransition(
+                                              position: Tween<Offset>(
+                                                begin: const Offset(0, 0.04),
+                                                end: Offset.zero,
+                                              ).animate(a),
+                                              child: child,
+                                            ),
+                                          ),
+                                      layoutBuilder: (current, previous) =>
+                                          Stack(
+                                            alignment: Alignment.topCenter,
+                                            children: [...previous, ?current],
+                                          ),
+                                      child: KeyedSubtree(
+                                        key: ValueKey(_screen),
+                                        child: _panel(content),
+                                      ),
+                                    ),
+                                  ],
+                                ),
                               ),
                             ),
-                            child: const Center(
-                              child: Text(
-                                "فهمت ✓  سأقوم بالتسجيل بالبرومو كود المعتمد",
-                                style: TextStyle(
-                                    color: Colors.white,
-                                    fontSize: 13,
-                                    fontWeight: FontWeight.bold),
-                              ),
+                          ),
+                        ],
+                      ),
+                    ),
+                  ),
+                  bar,
+                ],
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+
+  /// الشاشة الحالية: الحساب بكروت gpt، والباقي في لوح التذكرة
+  Widget _panel(double content) {
+    if (_screen == _Ob.account) return _accountScreen(content);
+    if (_screen == _Ob.register) return _registerScreen(content);
+    return TicketPanel(
+      glint: true,
+      padding: const EdgeInsets.fromLTRB(16, 20, 16, 18),
+      child: _activateScreen(),
+    );
+  }
+
+  /// كارت داكن بحافة خافتة مثل كروت gpt
+  Widget _card({required Widget child, EdgeInsets? padding, Key? key}) =>
+      Container(
+        key: key,
+        padding: padding ?? const EdgeInsets.all(16),
+        decoration: BoxDecoration(
+          color: kCoal.withValues(alpha: 0.86),
+          borderRadius: BorderRadius.circular(22),
+          border: Border.all(color: kWhite.withValues(alpha: 0.1)),
+        ),
+        child: child,
+      );
+
+  // ── الحساب: «افتح حسابك» ثم رسمة الفورم ثم اختيار المنصات ─────────────
+  Widget _accountScreen(double content) {
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: [
+        // افتح حسابك: الايقونة في دائرة على البداية والعنوان بجوارها
+        _card(
+          key: const ValueKey('account-card'),
+          padding: const EdgeInsets.fromLTRB(16, 16, 16, 16),
+          child: Row(
+            children: [
+              Container(
+                width: 66,
+                height: 66,
+                padding: const EdgeInsets.all(5),
+                decoration: BoxDecoration(
+                  shape: BoxShape.circle,
+                  border: Border.all(
+                    color: kEmerald.withValues(alpha: 0.45),
+                    width: 1.4,
+                  ),
+                ),
+                child: Container(
+                  decoration: BoxDecoration(
+                    shape: BoxShape.circle,
+                    color: kEmerald,
+                    boxShadow: [
+                      BoxShadow(
+                        color: kEmerald.withValues(alpha: 0.45),
+                        blurRadius: 16,
+                      ),
+                    ],
+                  ),
+                  child: Icon(
+                    Icons.person_add_alt_rounded,
+                    color: kOnEmerald,
+                    size: 26,
+                  ),
+                ),
+              ),
+              const SizedBox(width: 14),
+              Expanded(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    Text(
+                      tr('افتح حسابك', 'Open your account'),
+                      style: headText(kWhite, 22, height: 1.25),
+                    ),
+                    const SizedBox(height: 3),
+                    Text(
+                      tr(
+                        'التسجيل يستغرق دقيقتين. يُنسخ الرمز $kPromoCode تلقائيًا.',
+                        'Sign-up takes 2 minutes. Promo code $kPromoCode is copied for you.',
+                      ),
+                      style: bodyText(kMist, 13, height: 1.45),
+                    ),
+                  ],
+                ),
+              ),
+            ],
+          ),
+        ),
+        const SizedBox(height: 16),
+        // رسمة الفورم على البداية وخطواته الاربع بجوارها
+        LayoutBuilder(
+          builder: (context, box) {
+            final narrow = box.maxWidth < 330;
+            const mock = _SignupMock();
+            final steps = _SignupSteps(compact: narrow);
+            if (narrow) {
+              return Column(
+                crossAxisAlignment: CrossAxisAlignment.stretch,
+                children: [mock, const SizedBox(height: 14), steps],
+              );
+            }
+            return Row(
+              crossAxisAlignment: CrossAxisAlignment.center,
+              children: [
+                const Expanded(flex: 54, child: mock),
+                const SizedBox(width: 12),
+                Expanded(flex: 46, child: steps),
+              ],
+            );
+          },
+        ),
+        const SizedBox(height: 16),
+        // اختيار المنصة أسفل رسمة الفورم وخطوات التسجيل
+        _platformCard(content),
+        const SizedBox(height: 18),
+        Center(
+          child: GestureDetector(
+            key: const ValueKey('agreement-open'),
+            onTap: () => _AgreementSheet.show(context),
+            behavior: HitTestBehavior.opaque,
+            child: Padding(
+              padding: const EdgeInsets.symmetric(vertical: 4),
+              child: Text(
+                tr('اتفاقية المستخدم', 'User Agreement'),
+                style: bodyText(kEmeraldPale, 12.5, weight: FontWeight.w600)
+                    .copyWith(
+                      decoration: TextDecoration.underline,
+                      decorationColor: kEmeraldPale.withValues(alpha: 0.6),
+                    ),
+              ),
+            ),
+          ),
+        ),
+        const SizedBox(height: 2),
+        Text(
+          tr(
+            'بالضغط على «افتح حساب من خلالنا»، فإنك توافق على اتفاقية المستخدم.',
+            'By tapping “Open account through us”, you agree to the User Agreement.',
+          ),
+          textAlign: TextAlign.center,
+          style: bodyText(kWhiteFaint, 11, height: 1.45),
+        ),
+      ],
+    );
+  }
+
+  /// كارت المنصات: العنوان ثم ثلاث خانات مربعة فيها ايقونة المنصة وحدها،
+  /// والمختارة بحافة لونها وعلامة صح في ركنها، وتلوّن التطبيق كله
+  Widget _platformCard(double content) {
+    final cur = AppPrefs.instance.platform;
+    return _card(
+      key: const ValueKey('platform-card'),
+      padding: const EdgeInsets.fromLTRB(14, 14, 14, 14),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          Text(
+            tr('اختر المنصة', 'Select platform'),
+            style: headText(kWhite, 17, height: 1.3),
+          ),
+          const SizedBox(height: 2),
+          Text(
+            tr(
+              'حدد منصتك ليأخذ التطبيق لونها',
+              'Pick your platform — the app takes its colour',
+            ),
+            style: bodyText(kMist, 12.5, height: 1.4),
+          ),
+          const SizedBox(height: 14),
+          Row(
+            children: [
+              for (final p in Platform.values) ...[
+                if (p.index > 0) const SizedBox(width: 10),
+                Expanded(
+                  child: _PlatformTile(
+                    key: ValueKey('platform-${p.index}'),
+                    index: p.index,
+                    asset: p.asset,
+                    badge: p.badge,
+                    name: p.label,
+                    glow: platformColor(p),
+                    selected: cur == p,
+                    onTap: () => AppPrefs.instance.setPlatform(p),
+                  ),
+                ),
+              ],
+            ],
+          ),
+        ],
+      ),
+    );
+  }
+
+  // ── افتح حسابك: الموقع او التطبيق ────────────────────────────────
+  /// نفس الهوية بتقسيم جديد: كارت العنوان، ثم اختيار الطريقة في خانتين،
+  /// ثم كارت رمز الترويج، ثم خطوات الطريقة المختارة. الموقع خطوات على خط
+  /// زمني، والتطبيق نفس رسمة الفورم وخطواتها الاربع بعد فتح تطبيق المنصة.
+  Widget _registerScreen(double content) {
+    final web = _method == _Method.web;
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: [
+        _card(
+          key: const ValueKey('register-card'),
+          child: Row(
+            children: [
+              _IconDisc(icon: Icons.how_to_reg_rounded),
+              const SizedBox(width: 14),
+              Expanded(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    Text(
+                      tr('اختر طريقة التسجيل', 'Choose how to sign up'),
+                      style: headText(kWhite, 21, height: 1.25),
+                    ),
+                    const SizedBox(height: 3),
+                    Text(
+                      tr(
+                        'افتح حسابك برمز الترويج $kPromoCode في دقيقتين، من الموقع أو من تطبيق المنصة.',
+                        'Open your account with promo code $kPromoCode in 2 minutes, on the website or in the platform’s app.',
+                      ),
+                      style: bodyText(kMist, 13, height: 1.45),
+                    ),
+                  ],
+                ),
+              ),
+            ],
+          ),
+        ),
+        const SizedBox(height: 14),
+        // اختيار الطريقة: خانتان متجاورتان
+        IntrinsicHeight(
+          child: Row(
+            crossAxisAlignment: CrossAxisAlignment.stretch,
+            children: [
+              Expanded(
+                child: _MethodTile(
+                  key: const ValueKey('method-web'),
+                  icon: Icons.language_rounded,
+                  title: tr('عبر الموقع', 'On the website'),
+                  subtitle: tr(
+                    'يفتح في المتصفح مباشرة',
+                    'Opens right in your browser',
+                  ),
+                  tag: tr('الأسرع', 'Fastest'),
+                  selected: web,
+                  onTap: () => _pickMethod(_Method.web),
+                ),
+              ),
+              const SizedBox(width: 10),
+              Expanded(
+                child: _MethodTile(
+                  key: const ValueKey('method-app'),
+                  icon: Icons.phone_android_rounded,
+                  title: tr('عبر التطبيق', 'In the app'),
+                  subtitle: tr(
+                    'من تطبيق المنصة على موبايلك',
+                    'From the platform’s app on your phone',
+                  ),
+                  tag: tr('لو التطبيق عندك', 'If you have the app'),
+                  selected: !web,
+                  onTap: () => _pickMethod(_Method.app),
+                ),
+              ),
+            ],
+          ),
+        ),
+        const SizedBox(height: 14),
+        _PromoChip(onCopy: _copyPromo),
+        const SizedBox(height: 14),
+        AnimatedSwitcher(
+          duration: Motion.medium,
+          switchInCurve: Motion.emphasized,
+          transitionBuilder: (child, a) =>
+              FadeTransition(opacity: a, child: child),
+          layoutBuilder: (current, previous) => Stack(
+            alignment: Alignment.topCenter,
+            children: [...previous, ?current],
+          ),
+          child: web
+              ? _card(
+                  key: const ValueKey('steps-web'),
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.stretch,
+                    children: [
+                      _stepsHeader(
+                        Icons.language_rounded,
+                        tr('التسجيل عبر الموقع', 'Signing up on the website'),
+                        tr(
+                          '5 خطوات · نحو دقيقتين',
+                          '5 steps · about 2 minutes',
+                        ),
+                      ),
+                      const SizedBox(height: 14),
+                      _Timeline(
+                        items: [
+                          (
+                            tr(
+                              'اضغط «افتح موقع التسجيل»',
+                              'Tap “Open the sign-up site”',
                             ),
+                            tr(
+                              'يُنسخ رمز الترويج $kPromoCode تلقائيًا ويفتح الموقع.',
+                              'Promo code $kPromoCode is copied for you and the site opens.',
+                            ),
+                          ),
+                          (
+                            tr(
+                              'اضغط «التسجيل» واختر الطريقة',
+                              'Tap “Registration” and pick a method',
+                            ),
+                            tr(
+                              'بنقرة واحدة، أو برقم الهاتف، أو بالبريد الإلكتروني.',
+                              'One-click, phone number or e-mail.',
+                            ),
+                          ),
+                          (
+                            tr('أدخل البيانات المطلوبة', 'Fill in the details'),
+                            tr(
+                              'الدولة والعملة، والصق الرمز $kPromoCode في خانة رمز الترويج.',
+                              'Country and currency, and paste $kPromoCode in the promo code field.',
+                            ),
+                          ),
+                          (
+                            tr(
+                              'اضغط «تسجيل» واحفظ بياناتك',
+                              'Tap “Register” and save your details',
+                            ),
+                            tr(
+                              'احتفظ برقم الحساب وكلمة المرور في مكان آمن.',
+                              'Keep your account number and password somewhere safe.',
+                            ),
+                          ),
+                          (
+                            tr('ارجع هنا وكمّل', 'Come back and continue'),
+                            tr(
+                              'اضغط «سجّلت» وأدخل رقم حسابك.',
+                              'Tap “I’ve registered” and enter your account number.',
+                            ),
+                          ),
+                        ],
+                      ),
+                    ],
+                  ),
+                )
+              : _card(
+                  key: const ValueKey('steps-app'),
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.stretch,
+                    children: [
+                      _stepsHeader(
+                        Icons.phone_android_rounded,
+                        tr('التسجيل عبر التطبيق', 'Signing up in the app'),
+                        tr(
+                          'نفس خطوات الفورم · نحو دقيقتين',
+                          'The same form steps · about 2 minutes',
+                        ),
+                      ),
+                      const SizedBox(height: 14),
+                      Text(
+                        tr('قبل ما تبدأ', 'Before you start'),
+                        style: bodyText(
+                          kEmeraldPale,
+                          12.5,
+                          weight: FontWeight.w700,
+                        ),
+                      ),
+                      const SizedBox(height: 8),
+                      _Timeline(
+                        icons: const [
+                          Icons.phone_android_rounded,
+                          Icons.copy_rounded,
+                        ],
+                        items: [
+                          (
+                            tr('افتح تطبيق المنصة', 'Open the platform’s app'),
+                            tr(
+                              'لو مش متثبّت عندك، سجّل من الموقع بدلًا منه.',
+                              'If it isn’t installed, sign up on the website instead.',
+                            ),
+                          ),
+                          (
+                            tr(
+                              'انسخ رمز الترويج من هنا',
+                              'Copy the promo code here',
+                            ),
+                            tr(
+                              'الزر تحت ينسخ $kPromoCode لتلصقه في التطبيق.',
+                              'The button below copies $kPromoCode for you to paste in the app.',
+                            ),
+                          ),
+                        ],
+                      ),
+                      const SizedBox(height: 16),
+                      Text(
+                        tr('في التطبيق', 'In the app'),
+                        style: bodyText(
+                          kEmeraldPale,
+                          12.5,
+                          weight: FontWeight.w700,
+                        ),
+                      ),
+                      const SizedBox(height: 10),
+                      LayoutBuilder(
+                        builder: (context, box) {
+                          final narrow = box.maxWidth < 330;
+                          const mock = _SignupMock();
+                          final steps = _SignupSteps(compact: narrow);
+                          if (narrow) {
+                            return Column(
+                              crossAxisAlignment: CrossAxisAlignment.stretch,
+                              children: [
+                                mock,
+                                const SizedBox(height: 14),
+                                steps,
+                              ],
+                            );
+                          }
+                          return Row(
+                            children: [
+                              const Expanded(flex: 54, child: mock),
+                              const SizedBox(width: 12),
+                              Expanded(flex: 46, child: steps),
+                            ],
+                          );
+                        },
+                      ),
+                    ],
+                  ),
+                ),
+        ),
+      ],
+    );
+  }
+
+  /// عنوان كارت الخطوات: ايقونة الطريقة واسمها والمدة
+  /// العنوان في سطره، والمدة في كبسولة تحته حتى لا يضيق السطر على الشاشات الصغيرة
+  Widget _stepsHeader(IconData icon, String title, String sub) => Row(
+    crossAxisAlignment: CrossAxisAlignment.start,
+    children: [
+      Padding(
+        padding: const EdgeInsets.only(top: 2),
+        child: Icon(icon, size: 20, color: kEmerald),
+      ),
+      const SizedBox(width: 8),
+      Expanded(
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Text(title, style: headText(kWhite, 16, height: 1.3)),
+            const SizedBox(height: 6),
+            Container(
+              padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
+              decoration: BoxDecoration(
+                color: kEmerald.withValues(alpha: 0.12),
+                borderRadius: BorderRadius.circular(99),
+                border: Border.all(color: kEmerald.withValues(alpha: 0.4)),
+              ),
+              child: Text(
+                sub,
+                style: bodyText(
+                  kEmeraldPale,
+                  11,
+                  weight: FontWeight.w600,
+                  height: 1.2,
+                ),
+              ),
+            ),
+          ],
+        ),
+      ),
+    ],
+  );
+
+  // ── التفعيل: المعرّف والكود ───────────────────────────────────
+  Widget _activateScreen() {
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: [
+        Text(
+          tr(
+            'هل سجّلت حسابًا من خلالنا؟',
+            'Did you register an account through us?',
+          ),
+          style: headText(kWhite, 20, height: 1.3),
+        ),
+        const SizedBox(height: 4),
+        Text(
+          tr(
+            'أدخل معرّف حسابك للدخول.',
+            'Enter your account ID to sign in.',
+          ),
+          style: bodyText(kMist, 13),
+        ),
+        const SizedBox(height: 14),
+        _BoxField(
+          key: const ValueKey('field-id'),
+          label: tr('معرّف الحساب', 'Account ID'),
+          icon: Icons.badge_outlined,
+          controller: _idController,
+          focusNode: _idFocusNode,
+          hint: tr('أدخل معرف الحساب', 'Enter your account ID'),
+          error: _idError,
+          done: _s2 && _idError == null,
+          shake: _idShake,
+          action: TextInputAction.done,
+          keyboard: TextInputType.number,
+          onSubmitted: (_) => _submit(),
+        ),
+        const SizedBox(height: 16),
+        // السهم ايقونة لا حرف: خط العناوين ليس فيه رمز السهم
+        Text.rich(
+          TextSpan(
+            children: [
+              TextSpan(
+                text: tr(
+                  'أين أجده؟ الملف الشخصي ',
+                  'Where to find it? Personal profile ',
+                ),
+              ),
+              WidgetSpan(
+                alignment: PlaceholderAlignment.middle,
+                child: Icon(
+                  Icons.arrow_forward_rounded,
+                  size: 15,
+                  color: kEmeraldPale,
+                ),
+              ),
+              TextSpan(text: tr(' رقم الحساب', ' Account number')),
+            ],
+          ),
+          style: headText(kWhite, 13.5, height: 1.35),
+        ),
+        const SizedBox(height: 8),
+        const _ProfileMock(),
+      ],
+    );
+  }
+
+  // ── الازرار المثبتة تحت ───────────────────────────────────────
+  Widget _ctaBar(double content) {
+    final Widget body = switch (_screen) {
+      _Ob.account => Column(
+        mainAxisSize: MainAxisSize.min,
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          // الازرق: «بالفعل سجّلت حسابًا من خلالكم» الى المعرّف والكود مباشرة
+          PillButton(
+            key: const ValueKey('cta-have'),
+            label: tr(
+              'بالفعل سجّلت حسابًا من خلالكم',
+              'I already registered an account through you',
+            ),
+            height: 54,
+            attention: true,
+            onPressed: () => _go(_Ob.activate),
+          ),
+          const SizedBox(height: 10),
+          // بالاطار: يفتح صفحة اختيار طريقة التسجيل (الموقع او التطبيق)
+          _OutlineBar(
+            key: const ValueKey('cta-open'),
+            label: tr(
+              'افتح حساب من خلالنا',
+              'Open account through us',
+            ),
+            onTap: () => _go(_Ob.register),
+          ),
+        ],
+      ),
+      _Ob.register =>
+        _method == _Method.web
+            ? PillButton(
+                key: const ValueKey('reg-primary'),
+                label: _regOpened
+                    ? tr(
+                        'سجّلت — أدخل رقم الحساب',
+                        'I’ve registered — enter my ID',
+                      )
+                    : tr('افتح موقع التسجيل', 'Open the sign-up site'),
+                // السهم يتبع اتجاه اللغة
+                icon: _regOpened
+                    ? Icons.arrow_forward_rounded
+                    : Icons.open_in_new_rounded,
+                height: 54,
+                attention: true,
+                onPressed: _openSite,
+              )
+            : Column(
+                mainAxisSize: MainAxisSize.min,
+                crossAxisAlignment: CrossAxisAlignment.stretch,
+                children: [
+                  PillButton(
+                    key: const ValueKey('reg-primary'),
+                    label: _appCopied
+                        ? tr(
+                            'سجّلت — أدخل رقم الحساب',
+                            'I’ve registered — enter my ID',
+                          )
+                        : tr('انسخ رمز الترويج', 'Copy the promo code'),
+                    icon: _appCopied
+                        ? Icons.arrow_forward_rounded
+                        : Icons.copy_rounded,
+                    height: 54,
+                    attention: true,
+                    onPressed: _copyForApp,
+                  ),
+                  const SizedBox(height: 10),
+                  _OutlineBar(
+                    key: const ValueKey('reg-secondary'),
+                    label: tr(
+                      'التطبيق مش عندك؟ سجّل من الموقع',
+                      'No app? Sign up on the website',
+                    ),
+                    onTap: () => _pickMethod(_Method.web),
+                  ),
+                ],
+              ),
+      _Ob.activate => PillButton(
+        key: const ValueKey('cta-primary'),
+        label: tr('تسجيل الدخول', 'Sign in'),
+        icon: AppPrefs.instance.isEn
+            ? Icons.arrow_forward_rounded
+            : Icons.arrow_back_rounded,
+        loading: _isSubmitting,
+        height: 54,
+        attention: _s2 && _idError == null,
+        onPressed: _submit,
+      ),
+    };
+    final bottom = MediaQuery.of(context).padding.bottom;
+    return Entrance(
+      parent: _enter,
+      begin: 0.35,
+      end: 1,
+      dy: 24,
+      child: DecoratedBox(
+        decoration: BoxDecoration(
+          gradient: LinearGradient(
+            begin: Alignment.topCenter,
+            end: Alignment.bottomCenter,
+            colors: [
+              Colors.black.withValues(alpha: 0),
+              Colors.black.withValues(alpha: 0.96),
+            ],
+            stops: const [0, 0.35],
+          ),
+        ),
+        child: Padding(
+          padding: EdgeInsets.fromLTRB(0, 14, 0, 10 + bottom),
+          child: Center(
+            child: SizedBox(width: content, child: body),
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+// ── شريط الخطوات: الحساب ثم التفعيل ثم الوصول الى الاداة ────────
+class _StepsBar extends StatelessWidget {
+  final int current;
+  final bool accountDone;
+  const _StepsBar({required this.current, required this.accountDone});
+
+  @override
+  Widget build(BuildContext context) {
+    final labels = [
+      tr('الحساب', 'Account'),
+      tr('التفعيل', 'Activation'),
+      tr('الوصول إلى الأداة', 'Tool access'),
+    ];
+    String state(int i) {
+      if (i == 2) return 'lock';
+      if (i == current) return 'cur';
+      if (i == 0 && (accountDone || current > 0)) return 'done';
+      return i < current ? 'done' : 'todo';
+    }
+
+    final items = <Widget>[];
+    for (var i = 0; i < 3; i++) {
+      final st = state(i);
+      items.add(
+        SizedBox(
+          width: 78,
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              AnimatedContainer(
+                key: ValueKey('login-step-$i'),
+                duration: Motion.medium,
+                width: 30,
+                height: 30,
+                alignment: Alignment.center,
+                decoration: BoxDecoration(
+                  shape: BoxShape.circle,
+                  color: switch (st) {
+                    'cur' => kEmerald,
+                    'done' => kEmerald.withValues(alpha: 0.16),
+                    _ => kInk.withValues(alpha: 0.6),
+                  },
+                  border: Border.all(
+                    color: st == 'todo' || st == 'lock'
+                        ? kWhite.withValues(alpha: 0.2)
+                        : kEmerald.withValues(alpha: 0.8),
+                  ),
+                  boxShadow: st == 'cur'
+                      ? [
+                          BoxShadow(
+                            color: kEmerald.withValues(alpha: 0.45),
+                            blurRadius: 14,
+                          ),
+                        ]
+                      : null,
+                ),
+                child: switch (st) {
+                  'done' => Icon(
+                    Icons.check_rounded,
+                    size: 16,
+                    color: kEmerald,
+                  ),
+                  'lock' => Icon(
+                    Icons.lock_rounded,
+                    size: 14,
+                    color: kWhiteFaint,
+                  ),
+                  _ => Text(
+                    '${i + 1}',
+                    textDirection: TextDirection.ltr,
+                    style: markText(
+                      st == 'cur' ? kOnEmerald : kWhiteSoft,
+                      13,
+                      weight: FontWeight.w800,
+                      height: 1,
+                    ),
+                  ),
+                },
+              ),
+              const SizedBox(height: 5),
+              Text(
+                labels[i],
+                maxLines: 2,
+                textAlign: TextAlign.center,
+                style: bodyText(
+                  st == 'cur'
+                      ? kEmeraldPale
+                      : (st == 'done' ? kWhite : kWhiteFaint),
+                  10.5,
+                  weight: FontWeight.w700,
+                  height: 1.3,
+                ),
+              ),
+            ],
+          ),
+        ),
+      );
+      if (i < 2) {
+        items.add(
+          Expanded(
+            child: Padding(
+              padding: const EdgeInsets.only(top: 15),
+              child: AnimatedContainer(
+                duration: Motion.slow,
+                height: 1.4,
+                color: state(i) == 'done'
+                    ? kEmerald.withValues(alpha: 0.8)
+                    : kWhite.withValues(alpha: 0.16),
+              ),
+            ),
+          ),
+        );
+      }
+    }
+    return Row(crossAxisAlignment: CrossAxisAlignment.start, children: items);
+  }
+}
+
+// ── رسمة فورم التسجيل في موقع المنصة ───────────────────────────
+/// فورم فاتح مثل موقع المنصة كما في gpt: ارقام الخطوات في دوائر فاتحة على
+/// البداية بينها خط رأسي، ثم «تسجيل الدخول» ازرق و«التسجيل» اخضر بحلقة حمراء
+/// حوله، ثم «بنقرة واحدة»، ثم رمز الترويج مكتوبا وتحته خط، ثم زر التسجيل.
+class _SignupMock extends StatelessWidget {
+  const _SignupMock();
+
+  static const Color _paper = Color(0xFFF7F9FC);
+  static const Color _ink = Color(0xFF1B2A4A);
+  static const Color _line = Color(0xFFDCE3EE);
+  static const Color _green = Color(0xFF3DB35A);
+  static const Color _blue = Color(0xFF4A90E2);
+
+  static const double _rowH = 46;
+  static const double _gap = 12;
+
+  Widget _box(Widget child, {Color? fill, Color? edge, double? h}) => Container(
+    height: h ?? _rowH,
+    padding: const EdgeInsets.symmetric(horizontal: 8),
+    alignment: Alignment.center,
+    decoration: BoxDecoration(
+      color: fill ?? Colors.white,
+      borderRadius: BorderRadius.circular(12),
+      border: Border.all(color: edge ?? _line, width: 1.2),
+    ),
+    child: child,
+  );
+
+  @override
+  Widget build(BuildContext context) {
+    final bold = bodyText(_ink, 12.5, weight: FontWeight.w700, height: 1.2);
+    final rows = <Widget>[
+      // 1: تسجيل الدخول | التسجيل وحوله حلقة حمراء
+      Row(
+        children: [
+          Expanded(
+            child: _box(
+              Text(
+                tr('تسجيل الدخول', 'Log in'),
+                textAlign: TextAlign.center,
+                maxLines: 2,
+                style: bodyText(
+                  Colors.white,
+                  11.5,
+                  weight: FontWeight.w700,
+                  height: 1.15,
+                ),
+              ),
+              fill: _blue,
+              edge: _blue,
+            ),
+          ),
+          const SizedBox(width: 6),
+          Expanded(
+            child: Container(
+              padding: const EdgeInsets.all(2.5),
+              decoration: BoxDecoration(
+                borderRadius: BorderRadius.circular(30),
+                border: Border.all(color: const Color(0xFFE53935), width: 2),
+              ),
+              child: Container(
+                height: _rowH - 5,
+                padding: const EdgeInsets.symmetric(horizontal: 4),
+                alignment: Alignment.center,
+                decoration: BoxDecoration(
+                  color: _green,
+                  borderRadius: BorderRadius.circular(24),
+                ),
+                // الكلمة كاملة دائما: تصغر بدل ان تُقص
+                child: FittedBox(
+                  fit: BoxFit.scaleDown,
+                  child: Text(
+                    tr('التسجيل', 'Registration'),
+                    maxLines: 1,
+                    style: bodyText(
+                      Colors.white,
+                      11.5,
+                      weight: FontWeight.w700,
+                      height: 1.15,
+                    ),
+                  ),
+                ),
+              ),
+            ),
+          ),
+        ],
+      ),
+      // 2: بنقرة واحدة
+      _box(
+        Row(
+          mainAxisAlignment: MainAxisAlignment.center,
+          children: [
+            Container(
+              width: 24,
+              height: 24,
+              decoration: const BoxDecoration(
+                shape: BoxShape.circle,
+                color: Color(0xFFE6F0FC),
+              ),
+              child: const Icon(Icons.bolt_rounded, size: 16, color: _blue),
+            ),
+            const SizedBox(width: 6),
+            Flexible(
+              child: Text(
+                tr('بنقرة واحدة', 'One-click'),
+                maxLines: 1,
+                overflow: TextOverflow.ellipsis,
+                style: bold,
+              ),
+            ),
+          ],
+        ),
+      ),
+      // 3: رمز الترويج مكتوبا وتحته خط
+      Container(
+        height: _rowH + 12,
+        padding: const EdgeInsets.fromLTRB(10, 6, 10, 6),
+        decoration: BoxDecoration(
+          color: Colors.white,
+          borderRadius: BorderRadius.circular(12),
+          border: Border.all(color: _line, width: 1.2),
+        ),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          mainAxisAlignment: MainAxisAlignment.center,
+          children: [
+            Text(
+              tr('رمز الترويج (إن وُجد)', 'Promo code (if you have one)'),
+              maxLines: 1,
+              overflow: TextOverflow.ellipsis,
+              style: bodyText(const Color(0xFF7A8699), 9.5, height: 1.2),
+            ),
+            Text(
+              kPromoCode,
+              textDirection: TextDirection.ltr,
+              textAlign: AppPrefs.instance.isEn
+                  ? TextAlign.left
+                  : TextAlign.right,
+              style: bodyText(_ink, 16, weight: FontWeight.w800, height: 1.2),
+            ),
+            Container(height: 1.4, color: _blue.withValues(alpha: 0.7)),
+          ],
+        ),
+      ),
+      // 4: زر التسجيل داخل صندوق
+      Container(
+        height: _rowH + 4,
+        padding: const EdgeInsets.all(5),
+        decoration: BoxDecoration(
+          color: Colors.white,
+          borderRadius: BorderRadius.circular(12),
+          border: Border.all(color: _line, width: 1.2),
+        ),
+        child: Container(
+          alignment: Alignment.center,
+          decoration: BoxDecoration(
+            color: _green,
+            borderRadius: BorderRadius.circular(9),
+          ),
+          child: Text(
+            tr('تسجيل', 'Register'),
+            style: bodyText(
+              Colors.white,
+              12.5,
+              weight: FontWeight.w700,
+              height: 1.2,
+            ),
+          ),
+        ),
+      ),
+    ];
+
+    return Container(
+      padding: const EdgeInsets.fromLTRB(10, 12, 10, 12),
+      decoration: BoxDecoration(
+        color: _paper,
+        borderRadius: BorderRadius.circular(18),
+        boxShadow: [
+          BoxShadow(
+            color: kEmerald.withValues(alpha: 0.16),
+            blurRadius: 24,
+            spreadRadius: -8,
+          ),
+        ],
+      ),
+      child: IntrinsicHeight(
+        child: Row(
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          children: [
+            // عمود الارقام وبينها خط رأسي
+            SizedBox(
+              width: 28,
+              child: Column(
+                children: [
+                  for (var i = 0; i < rows.length; i++) ...[
+                    if (i > 0)
+                      Expanded(
+                        child: Center(
+                          child: Container(width: 1.4, color: _line),
+                        ),
+                      ),
+                    Container(
+                      width: 28,
+                      height: 28,
+                      alignment: Alignment.center,
+                      decoration: BoxDecoration(
+                        shape: BoxShape.circle,
+                        color: const Color(0xFFEEF3FA),
+                        border: Border.all(color: const Color(0xFFC9D6EA)),
+                      ),
+                      child: Text(
+                        '${i + 1}',
+                        textDirection: TextDirection.ltr,
+                        style: bodyText(
+                          _ink,
+                          12.5,
+                          weight: FontWeight.w700,
+                          height: 1,
+                        ),
+                      ),
+                    ),
+                  ],
+                ],
+              ),
+            ),
+            const SizedBox(width: 8),
+            Expanded(
+              child: Column(
+                children: [
+                  for (var i = 0; i < rows.length; i++) ...[
+                    if (i > 0) const SizedBox(height: _gap),
+                    rows[i],
+                  ],
+                ],
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+/// خطوات التسجيل الاربع بجوار الرسمة: رقم في دائرة بحلقة لون المنصة،
+/// والكلمة المهمة عريضة
+class _SignupSteps extends StatelessWidget {
+  final bool compact;
+  const _SignupSteps({required this.compact});
+
+  @override
+  Widget build(BuildContext context) {
+    final steps = [
+      (tr('اضغط زر ', 'Tap '), tr('التسجيل', 'Registration')),
+      (tr('اختر ', 'Choose '), tr('بنقرة واحدة', 'One-click')),
+      (tr('أدخل رمز الترويج ', 'Enter promo code '), kPromoCode),
+      (tr('اضغط ', 'Tap '), tr('تسجيل', 'Register')),
+    ];
+    return Column(
+      mainAxisSize: MainAxisSize.min,
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: [
+        for (var i = 0; i < steps.length; i++)
+          Padding(
+            padding: EdgeInsets.only(bottom: i == steps.length - 1 ? 0 : 14),
+            child: Row(
+              children: [
+                Container(
+                  width: 34,
+                  height: 34,
+                  alignment: Alignment.center,
+                  decoration: BoxDecoration(
+                    shape: BoxShape.circle,
+                    color: kInk.withValues(alpha: 0.6),
+                    border: Border.all(
+                      color: kEmerald.withValues(alpha: 0.75),
+                      width: 1.6,
+                    ),
+                  ),
+                  child: Text(
+                    '${i + 1}',
+                    textDirection: TextDirection.ltr,
+                    style: bodyText(
+                      kEmeraldPale,
+                      14,
+                      weight: FontWeight.w700,
+                      height: 1,
+                    ),
+                  ),
+                ),
+                const SizedBox(width: 10),
+                Expanded(
+                  child: Text.rich(
+                    TextSpan(
+                      children: [
+                        TextSpan(text: steps[i].$1),
+                        TextSpan(
+                          text: steps[i].$2,
+                          style: const TextStyle(fontWeight: FontWeight.w800),
+                        ),
+                      ],
+                    ),
+                    style: bodyText(kWhite, compact ? 14 : 15, height: 1.35),
+                  ),
+                ),
+              ],
+            ),
+          ),
+      ],
+    );
+  }
+}
+
+// ── رسمة الملف الشخصي: مكان رقم الحساب ─────────────────────────
+/// صفحة «الملف الشخصي» في موقع المنصة: رقم الحساب في صندوق متقطع، واسم
+/// مستخدم مموّه
+class _ProfileMock extends StatelessWidget {
+  const _ProfileMock();
+
+  @override
+  Widget build(BuildContext context) {
+    const ink = Color(0xFF1B2433);
+    const mute = Color(0xFF6B7686);
+    return Container(
+      decoration: BoxDecoration(
+        color: const Color(0xFFEFF3F7),
+        borderRadius: BorderRadius.circular(14),
+      ),
+      clipBehavior: Clip.antiAlias,
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          Container(
+            color: const Color(0xFF1A4F8B),
+            padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 9),
+            child: Row(
+              children: [
+                const Icon(Icons.person_rounded, color: Colors.white, size: 16),
+                const SizedBox(width: 6),
+                Text(
+                  tr('الملف الشخصي', 'Personal profile'),
+                  style: bodyText(
+                    Colors.white,
+                    12,
+                    weight: FontWeight.w700,
+                    height: 1.2,
+                  ),
+                ),
+              ],
+            ),
+          ),
+          Padding(
+            padding: const EdgeInsets.fromLTRB(12, 10, 12, 12),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.stretch,
+              children: [
+                Text(
+                  tr('الحساب', 'Account'),
+                  style: bodyText(
+                    mute,
+                    10.5,
+                    weight: FontWeight.w600,
+                    height: 1.2,
+                  ),
+                ),
+                const SizedBox(height: 6),
+                CustomPaint(
+                  painter: _DashedRRectPainter(color: kEmerald),
+                  child: Padding(
+                    padding: const EdgeInsets.symmetric(
+                      horizontal: 10,
+                      vertical: 8,
+                    ),
+                    child: Row(
+                      children: [
+                        Text(
+                          tr('رقم الحساب', 'Account number'),
+                          style: bodyText(
+                            ink,
+                            11.5,
+                            weight: FontWeight.w600,
+                            height: 1.2,
+                          ),
+                        ),
+                        const Spacer(),
+                        Text(
+                          'id: 12345678',
+                          textDirection: TextDirection.ltr,
+                          style: bodyText(
+                            ink,
+                            13,
+                            weight: FontWeight.w800,
+                            height: 1.2,
                           ),
                         ),
                       ],
                     ),
                   ),
                 ),
-              ),
-            ),
-          ),
-        );
-      },
-    );
-  }
-
-  void _showSubscriptionDialog() {
-    showGeneralDialog(
-      context: context,
-      barrierDismissible: false,
-      barrierLabel: "SubscriptionDialog",
-      transitionDuration: const Duration(milliseconds: 350),
-      pageBuilder: (context, anim1, anim2) => const SizedBox.shrink(),
-      transitionBuilder: (context, anim1, anim2, child) {
-        final scale = Tween<double>(begin: 0.95, end: 1.0)
-            .animate(CurvedAnimation(parent: anim1, curve: Curves.easeOut));
-        final opacity =
-            Tween<double>(begin: 0.0, end: 1.0).animate(anim1);
-        return ScaleTransition(
-          scale: scale,
-          child: FadeTransition(
-            opacity: opacity,
-            child: SubscriptionDialogContent(
-              onComplete: () async {
-                final prefs = await SharedPreferences.getInstance();
-                await prefs.setString(
-                    'user_id', _idController.text.trim());
-                String platformName = _selectedPlatform == 0
-                    ? "Melbet"
-                    : _selectedPlatform == 1
-                        ? "Linebet"
-                        : "1Xbet";
-                await prefs.setString('selected_platform', platformName);
-                if (context.mounted) {
-                  Navigator.of(context).pop();
-                  widget.onComplete();
-                }
-              },
-            ),
-          ),
-        );
-      },
-    );
-  }
-
-  // ── Social buttons (bottom of panel) ──────────
-  Widget _buildSocialButton({
-    required String label,
-    required IconData icon,
-    required Color color,
-    required String url,
-  }) {
-    return GestureDetector(
-      onTap: () async {
-        final Uri uri = Uri.parse(url);
-        try {
-          await launchUrl(uri, mode: LaunchMode.externalApplication);
-        } catch (_) {}
-      },
-      child: Container(
-        padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 10),
-        decoration: BoxDecoration(
-          color: _kPanelBg,
-          borderRadius: BorderRadius.circular(24),
-          border: Border.all(color: _kPurpleMid.withValues(alpha: 0.5)),
-        ),
-        child: Row(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            Icon(icon, color: color, size: 18),
-            const SizedBox(width: 8),
-            Text(label,
-                style: const TextStyle(
-                    color: Colors.white,
-                    fontSize: 12,
-                    fontWeight: FontWeight.bold)),
-          ],
-        ),
-      ),
-    );
-  }
-
-  // ─────────────────────────────────────────────
-  // BUILD
-  // ─────────────────────────────────────────────
-  @override
-  Widget build(BuildContext context) {
-    final size = MediaQuery.of(context).size;
-    final topSectionHeight = size.height * 0.40;
-    final panelHeight = size.height * 0.65;
-
-    return Scaffold(
-      backgroundColor: _kBlack,
-      resizeToAvoidBottomInset: true,
-      body: AnimatedBuilder(
-        animation: _entryController,
-        builder: (context, _) {
-          return Stack(
-            children: [
-              // ═══════════════════════════════════
-              // LAYER 1 — BACKGROUND
-              // ═══════════════════════════════════
-              FadeTransition(
-                opacity: _bgFade,
-                child: SizedBox.expand(
-                  child: CustomPaint(
-                    painter: _DotGridPainter(),
+                const SizedBox(height: 6),
+                Padding(
+                  padding: const EdgeInsets.symmetric(
+                    horizontal: 10,
+                    vertical: 4,
                   ),
-                ),
-              ),
-
-              // Geometric circle — top left
-              FadeTransition(
-                opacity: _bgFade,
-                child: Positioned(
-                  top: -120,
-                  left: -120,
-                  child: SizedBox(
-                    width: 300,
-                    height: 300,
-                    child: CustomPaint(
-                      painter: _GeometricCirclePainter(
-                        color: _kPurpleMid.withValues(alpha: 0.30),
+                  child: Row(
+                    children: [
+                      Text(
+                        tr('اسم المستخدم', 'Username'),
+                        style: bodyText(mute, 11, height: 1.2),
                       ),
-                    ),
-                  ),
-                ),
-              ),
-
-              // Geometric circle — bottom right
-              FadeTransition(
-                opacity: _bgFade,
-                child: Positioned(
-                  bottom: -120,
-                  right: -120,
-                  child: SizedBox(
-                    width: 300,
-                    height: 300,
-                    child: CustomPaint(
-                      painter: _GeometricCirclePainter(
-                        color: _kPurpleMid.withValues(alpha: 0.30),
-                      ),
-                    ),
-                  ),
-                ),
-              ),
-
-              // ═══════════════════════════════════
-              // LAYER 2 — TOP IDENTITY SECTION
-              // ═══════════════════════════════════
-              Positioned(
-                top: 0,
-                left: 0,
-                right: 0,
-                height: topSectionHeight,
-                child: SlideTransition(
-                  position: _identitySlide,
-                  child: FadeTransition(
-                    opacity: _identityFade,
-                    child: SafeArea(
-                      bottom: false,
-                      child: Padding(
-                        padding: const EdgeInsets.fromLTRB(24, 32, 24, 0),
-                        child: Row(
-                          crossAxisAlignment: CrossAxisAlignment.start,
-                          children: [
-                            // Left: purple bar + text stack
-                            Expanded(
-                              child: Row(
-                                crossAxisAlignment: CrossAxisAlignment.start,
-                                children: [
-                                  // 3px purple vertical bar
-                                  Container(
-                                    width: 3,
-                                    height: 80,
-                                    decoration: BoxDecoration(
-                                      color: _kPurple,
-                                      borderRadius: BorderRadius.circular(2),
-                                    ),
-                                  ),
-                                  const SizedBox(width: 12),
-                                  // Text stack
-                                  Column(
-                                    crossAxisAlignment:
-                                        CrossAxisAlignment.start,
-                                    children: [
-                                      // AUTHORIZED ACCESS ONLY
-                                      const Text(
-                                        "AUTHORIZED ACCESS ONLY",
-                                        style: TextStyle(
-                                          fontFamily: 'monospace',
-                                          fontSize: 9,
-                                          color: Color(0xFF3D2F6E),
-                                          letterSpacing: 3,
-                                          fontWeight: FontWeight.bold,
-                                        ),
-                                      ),
-                                      const SizedBox(height: 8),
-                                      // JoeX + Apple
-                                      RichText(
-                                        text: const TextSpan(
-                                          style: TextStyle(
-                                            fontSize: 32,
-                                            fontWeight: FontWeight.w900,
-                                          ),
-                                          children: [
-                                            TextSpan(
-                                              text: "JoeX",
-                                              style: TextStyle(
-                                                  color: Colors.white),
-                                            ),
-                                            TextSpan(
-                                              text: " Apple",
-                                              style:
-                                                  TextStyle(color: _kPurple),
-                                            ),
-                                          ],
-                                        ),
-                                      ),
-                                      const SizedBox(height: 6),
-                                      // DECRYPTION PORTAL
-                                      const Text(
-                                        "DECRYPTION PORTAL",
-                                        style: TextStyle(
-                                          fontFamily: 'monospace',
-                                          fontSize: 10,
-                                          color: _kSubText,
-                                          letterSpacing: 2,
-                                        ),
-                                      ),
-                                    ],
-                                  ),
-                                ],
-                              ),
-                            ),
-
-                            // Right: Logo with L-brackets
-                            SizedBox(
-                              width: 80,
-                              height: 80,
-                              child: Stack(
-                                alignment: Alignment.center,
-                                children: [
-                                  // Circular logo
-                                  Container(
-                                    width: 56,
-                                    height: 56,
-                                    decoration: BoxDecoration(
-                                      shape: BoxShape.circle,
-                                      border: Border.all(
-                                          color: _kPurple, width: 1.5),
-                                    ),
-                                    child: ClipOval(
-                                      child: Image.asset(
-                                        "assets/app_logo.png",
-                                        fit: BoxFit.cover,
-                                      ),
-                                    ),
-                                  ),
-                                  // L-shaped corner brackets
-                                  CustomPaint(
-                                    size: const Size(80, 80),
-                                    painter: _CornerBracketsPainter(
-                                      color: _kPurple,
-                                      strokeWidth: 1.5,
-                                      armLength: 12.0,
-                                      padding: 4.0,
-                                    ),
-                                  ),
-                                ],
-                              ),
-                            ),
-                          ],
-                        ),
-                      ),
-                    ),
-                  ),
-                ),
-              ),
-
-              // ═══════════════════════════════════
-              // LAYER 3 — BOTTOM GLASS PANEL
-              // ═══════════════════════════════════
-              Positioned(
-                bottom: 0,
-                left: 0,
-                right: 0,
-                height: panelHeight,
-                child: SlideTransition(
-                  position: _panelSlide,
-                  child: FadeTransition(
-                    opacity: _panelFade,
-                    child: ClipRRect(
-                      borderRadius: const BorderRadius.only(
-                        topLeft: Radius.circular(28),
-                        topRight: Radius.circular(28),
-                      ),
-                      child: BackdropFilter(
-                        filter: ImageFilter.blur(sigmaX: 20, sigmaY: 20),
-                        child: Container(
-                          decoration: const BoxDecoration(
-                            color: _kPanelBg,
-                            borderRadius: BorderRadius.only(
-                              topLeft: Radius.circular(28),
-                              topRight: Radius.circular(28),
-                            ),
-                            border: Border(
-                              top: BorderSide(
-                                  color: _kPurpleMid, width: 1.0),
-                            ),
-                          ),
-                          child: SingleChildScrollView(
-                            padding: EdgeInsets.only(
-                              left: 24,
-                              right: 24,
-                              top: 0,
-                              bottom:
-                                  MediaQuery.of(context).viewInsets.bottom +
-                                      24,
-                            ),
-                            child: Column(
-                              crossAxisAlignment: CrossAxisAlignment.stretch,
-                              children: [
-                                // ── Drag indicator ────────────────
-                                const SizedBox(height: 16),
-                                Center(
-                                  child: Container(
-                                    width: 40,
-                                    height: 3,
-                                    decoration: BoxDecoration(
-                                      color: _kPurple,
-                                      borderRadius: BorderRadius.circular(2),
-                                    ),
-                                  ),
-                                ),
-                                const SizedBox(height: 24),
-
-                                // ── OPERATOR CREDENTIALS label ─────
-                                const Text(
-                                  "OPERATOR CREDENTIALS",
-                                  style: TextStyle(
-                                    fontFamily: 'monospace',
-                                    fontSize: 9,
-                                    color: _kSubText,
-                                    letterSpacing: 2,
-                                  ),
-                                ),
-                                const SizedBox(height: 20),
-
-                                // ── Field 1: ID ───────────────────
-                                FadeTransition(
-                                  opacity: _field1Fade,
-                                  child: _buildUnderlineField(
-                                    label: "[ ID ]",
-                                    controller: _idController,
-                                    focusNode: _idFocusNode,
-                                    hintText: "أدخل معرف الحساب",
-                                    prefixIcon: Icons.account_box_outlined,
-                                    hasError: false,
-                                  ),
-                                ),
-
-                                const SizedBox(height: 4),
-                                // Divider between fields
-                                Container(
-                                    height: 0.5,
-                                    color: _kLineColor),
-                                const SizedBox(height: 4),
-
-                                // ── Field 2: PROMO ────────────────
-                                FadeTransition(
-                                  opacity: _field2Fade,
-                                  child: ShakeWidget(
-                                    controller: _shakeController,
-                                    child: _buildUnderlineField(
-                                      label: "[ PROMO ]",
-                                      controller: _promoController,
-                                      focusNode: _promoFocusNode,
-                                      hintText: "أدخل كود التفعيل",
-                                      prefixIcon: Icons.vpn_key_outlined,
-                                      hasError: _hasPromoError,
-                                    ),
-                                  ),
-                                ),
-
-                                if (_hasPromoError)
-                                  const Padding(
-                                    padding:
-                                        EdgeInsets.only(top: 6.0, right: 8.0),
-                                    child: Text(
-                                      "خطأ: البرومو كود غير صالح!",
-                                      style: TextStyle(
-                                          color: Colors.redAccent,
-                                          fontSize: 11),
-                                      textAlign: TextAlign.right,
-                                    ),
-                                  ),
-
-                                const SizedBox(height: 28),
-
-                                // ── Platform Selector ──────────────
-                                FadeTransition(
-                                  opacity: _platformFade,
-                                  child: _buildPlatformSelector(),
-                                ),
-
-                                const SizedBox(height: 28),
-
-                                // ── Decrypt Button ─────────────────
-                                FadeTransition(
-                                  opacity: _buttonFade,
-                                  child: Center(
-                                    child: GestureDetector(
-                                      onTapDown: (_) => setState(
-                                          () => _buttonScale = 0.97),
-                                      onTapUp: (_) =>
-                                          setState(() => _buttonScale = 1.0),
-                                      onTapCancel: () =>
-                                          setState(() => _buttonScale = 1.0),
-                                      onTap: _attemptLogin,
-                                      child: AnimatedScale(
-                                        scale: _buttonScale,
-                                        duration:
-                                            const Duration(milliseconds: 100),
-                                        child: _buildDecryptButton(),
-                                      ),
-                                    ),
-                                  ),
-                                ),
-
-                                const SizedBox(height: 28),
-
-                                // ── Social Buttons ─────────────────
-                                FadeTransition(
-                                  opacity: _buttonFade,
-                                  child: Row(
-                                    mainAxisAlignment:
-                                        MainAxisAlignment.center,
-                                    children: [
-                                      _buildSocialButton(
-                                        label: "قناة التليجرام",
-                                        icon: Icons.send,
-                                        color: const Color(0xFF229ED9),
-                                        url: "https://t.me/elostora_vip",
-                                      ),
-                                      const SizedBox(width: 16),
-                                      _buildSocialButton(
-                                        label: "قناة اليوتيوب",
-                                        icon: Icons.play_circle_fill,
-                                        color: const Color(0xFFFF0000),
-                                        url:
-                                            "https://youtube.com/@sir_joex1",
-                                      ),
-                                    ],
-                                  ),
-                                ),
-                                const SizedBox(height: 8),
-                              ],
-                            ),
+                      const Spacer(),
+                      ImageFiltered(
+                        imageFilter: ui.ImageFilter.blur(sigmaX: 3, sigmaY: 3),
+                        child: Text(
+                          'ahmed.m_88',
+                          textDirection: TextDirection.ltr,
+                          style: bodyText(
+                            ink,
+                            12,
+                            weight: FontWeight.w600,
+                            height: 1.2,
                           ),
                         ),
                       ),
-                    ),
-                  ),
-                ),
-              ),
-            ],
-          );
-        },
-      ),
-    );
-  }
-
-  // ── Underline-only Input Field ─────────────────
-  Widget _buildUnderlineField({
-    required String label,
-    required TextEditingController controller,
-    required FocusNode focusNode,
-    required String hintText,
-    required IconData prefixIcon,
-    required bool hasError,
-  }) {
-    final isFocused = focusNode.hasFocus;
-    final lineColor = hasError
-        ? Colors.redAccent
-        : isFocused
-            ? _kPurple
-            : _kPurpleMid;
-
-    return Column(
-      crossAxisAlignment: CrossAxisAlignment.start,
-      children: [
-        // Label above field
-        Text(
-          label,
-          style: const TextStyle(
-            fontFamily: 'monospace',
-            fontSize: 9,
-            color: _kPurple,
-            letterSpacing: 1.5,
-            fontWeight: FontWeight.bold,
-          ),
-        ),
-        const SizedBox(height: 6),
-        Row(
-          children: [
-            // Prefix icon
-            Icon(prefixIcon, color: _kPurple, size: 18),
-            const SizedBox(width: 10),
-            // Input
-            Expanded(
-              child: TextField(
-                controller: controller,
-                focusNode: focusNode,
-                textDirection: TextDirection.rtl,
-                textAlign: TextAlign.right,
-                style: TextStyle(
-                  color: hasError ? Colors.redAccent : Colors.white,
-                  fontSize: 15,
-                ),
-                decoration: InputDecoration(
-                  isDense: true,
-                  contentPadding:
-                      const EdgeInsets.symmetric(vertical: 10),
-                  hintText: hintText,
-                  hintStyle: const TextStyle(
-                    color: _kDimText,
-                    fontSize: 14,
-                  ),
-                  border: InputBorder.none,
-                  enabledBorder: InputBorder.none,
-                  focusedBorder: InputBorder.none,
-                ),
-              ),
-            ),
-          ],
-        ),
-        // Bottom underline only
-        AnimatedContainer(
-          duration: const Duration(milliseconds: 200),
-          height: 1,
-          color: lineColor,
-        ),
-        const SizedBox(height: 12),
-      ],
-    );
-  }
-
-  // ── Platform Selector (column of rows) ────────
-  Widget _buildPlatformSelector() {
-    final platforms = [
-      {"index": 0, "name": "Melbet", "uptime": "99.8%"},
-      {"index": 2, "name": "1Xbet", "uptime": "98.5%"},
-      {"index": 1, "name": "Linebet", "uptime": "97.2%"},
-    ];
-
-    return Column(
-      crossAxisAlignment: CrossAxisAlignment.stretch,
-      children: platforms.map((p) {
-        final idx = p["index"] as int;
-        final isSelected = _selectedPlatform == idx;
-        return GestureDetector(
-          onTap: () => setState(() => _selectedPlatform = idx),
-          child: AnimatedContainer(
-            duration: const Duration(milliseconds: 200),
-            margin: const EdgeInsets.only(bottom: 10),
-            padding:
-                const EdgeInsets.symmetric(horizontal: 14, vertical: 13),
-            decoration: BoxDecoration(
-              color: isSelected
-                  ? _kLineColor
-                  : Colors.transparent,
-              borderRadius: BorderRadius.circular(10),
-              border: Border.all(
-                color: isSelected
-                    ? _kPurpleMid
-                    : _kLineColor,
-                width: 1.0,
-              ),
-            ),
-            child: Row(
-              children: [
-                // Left: selection ring
-                AnimatedContainer(
-                  duration: const Duration(milliseconds: 200),
-                  width: 8,
-                  height: 8,
-                  decoration: BoxDecoration(
-                    shape: BoxShape.circle,
-                    color: isSelected ? _kPurple : Colors.transparent,
-                    border: Border.all(
-                      color: isSelected ? _kPurple : _kSubText,
-                      width: 1.5,
-                    ),
-                  ),
-                ),
-                const SizedBox(width: 12),
-                // Platform name
-                Expanded(
-                  child: Text(
-                    p["name"] as String,
-                    style: TextStyle(
-                      color:
-                          isSelected ? Colors.white : const Color(0xFF8E8E93),
-                      fontSize: 14,
-                      fontWeight: isSelected
-                          ? FontWeight.w700
-                          : FontWeight.w400,
-                    ),
-                    textAlign: TextAlign.right,
-                  ),
-                ),
-                // Uptime
-                Text(
-                  p["uptime"] as String,
-                  style: const TextStyle(
-                    fontFamily: 'monospace',
-                    fontSize: 10,
-                    color: _kSubText,
+                    ],
                   ),
                 ),
               ],
             ),
           ),
-        );
-      }).toList(),
-    );
-  }
-
-  // ── Decrypt Button ─────────────────────────────
-  Widget _buildDecryptButton() {
-    return Container(
-      width: MediaQuery.of(context).size.width * 0.85,
-      height: 58,
-      decoration: BoxDecoration(
-        borderRadius: BorderRadius.circular(16),
-        gradient: const LinearGradient(
-          colors: [_kPurpleDark, _kPurple],
-          begin: Alignment(0.0, -1.0),
-          end: Alignment(1.0, 1.0),
-          // Simulating 135deg
-        ),
-        boxShadow: [
-          BoxShadow(
-            color: _kPurple.withValues(alpha: 0.30),
-            blurRadius: 24,
-            spreadRadius: 2,
-            offset: const Offset(0, 4),
-          ),
-        ],
-      ),
-      child: Stack(
-        children: [
-          // Arrow icon on the right
-          Positioned(
-            right: 20,
-            top: 0,
-            bottom: 0,
-            child: Center(
-              child: Icon(
-                Icons.arrow_forward,
-                color: Colors.white.withValues(alpha: 0.60),
-                size: 20,
-              ),
-            ),
-          ),
-          // Text in the center
-          Center(
-            child: _isLoggingIn
-                ? Row(
-                    mainAxisAlignment: MainAxisAlignment.center,
-                    mainAxisSize: MainAxisSize.min,
-                    children: [
-                      const Text(
-                        "...جاري التحقق",
-                        style: TextStyle(
-                          color: Colors.white,
-                          fontWeight: FontWeight.bold,
-                          fontSize: 16,
-                        ),
-                      ),
-                      const SizedBox(width: 10),
-                      const SizedBox(
-                        width: 14,
-                        height: 14,
-                        child: CircularProgressIndicator(
-                          strokeWidth: 2.0,
-                          valueColor:
-                              AlwaysStoppedAnimation<Color>(Colors.white),
-                        ),
-                      ),
-                    ],
-                  )
-                : Column(
-                    mainAxisAlignment: MainAxisAlignment.center,
-                    children: [
-                      const Text(
-                        "بدء فك التشفير",
-                        style: TextStyle(
-                          color: Colors.white,
-                          fontWeight: FontWeight.bold,
-                          fontSize: 16,
-                        ),
-                      ),
-                      const SizedBox(height: 2),
-                      Text(
-                        "[DECRYPT]",
-                        style: TextStyle(
-                          fontFamily: 'monospace',
-                          fontSize: 9,
-                          color: Colors.white.withValues(alpha: 0.50),
-                        ),
-                      ),
-                    ],
-                  ),
-          ),
         ],
       ),
     );
   }
 }
 
-// ─────────────────────────────────────────────
-// SHAKE WIDGET
-// ─────────────────────────────────────────────
-class ShakeWidget extends StatefulWidget {
-  final Widget child;
-  final AnimationController controller;
+class _DashedRRectPainter extends CustomPainter {
+  final Color color;
+  const _DashedRRectPainter({required this.color});
 
-  const ShakeWidget(
-      {super.key, required this.child, required this.controller});
-
-  @override
-  State<ShakeWidget> createState() => _ShakeWidgetState();
-}
-
-class _ShakeWidgetState extends State<ShakeWidget> {
-  late Animation<double> _offsetAnimation;
-
-  @override
-  void initState() {
-    super.initState();
-    _offsetAnimation = Tween<double>(begin: 0.0, end: 24.0)
-        .chain(CurveTween(curve: Curves.elasticIn))
-        .animate(widget.controller)
-      ..addStatusListener((status) {
-        if (status == AnimationStatus.completed) widget.controller.reset();
-      });
-  }
-
-  @override
-  Widget build(BuildContext context) {
-    return AnimatedBuilder(
-      animation: _offsetAnimation,
-      builder: (context, child) {
-        final double offset =
-            math.sin(_offsetAnimation.value * math.pi * 3) * 6;
-        return Transform.translate(offset: Offset(offset, 0), child: child);
-      },
-      child: widget.child,
-    );
-  }
-}
-
-// ─────────────────────────────────────────────
-// CUSTOM PAINTERS
-// ─────────────────────────────────────────────
-
-/// Dot grid background — 2px dots every 28px
-class _DotGridPainter extends CustomPainter {
   @override
   void paint(Canvas canvas, Size size) {
+    final rrect = RRect.fromRectAndRadius(
+      (Offset.zero & size).deflate(1),
+      const Radius.circular(9),
+    );
     final paint = Paint()
-      ..color = const Color(0xFF1A1530)
-      ..style = PaintingStyle.fill;
-
-    const double spacing = 28.0;
-    const double dotRadius = 1.0;
-    for (double y = 0; y < size.height; y += spacing) {
-      for (double x = 0; x < size.width; x += spacing) {
-        canvas.drawCircle(Offset(x, y), dotRadius, paint);
+      ..style = PaintingStyle.stroke
+      ..strokeWidth = 1.6
+      ..color = color;
+    final path = Path()..addRRect(rrect);
+    for (final m in path.computeMetrics()) {
+      var d = 0.0;
+      while (d < m.length) {
+        canvas.drawPath(m.extractPath(d, math.min(d + 6, m.length)), paint);
+        d += 10;
       }
     }
   }
 
   @override
-  bool shouldRepaint(covariant _DotGridPainter oldDelegate) => false;
+  bool shouldRepaint(covariant _DashedRRectPainter old) => old.color != color;
 }
 
-/// Large partial circle (stroke only) for geometric decoration
-class _GeometricCirclePainter extends CustomPainter {
-  final Color color;
-  _GeometricCirclePainter({required this.color});
-
-  @override
-  void paint(Canvas canvas, Size size) {
-    final paint = Paint()
-      ..color = color
-      ..style = PaintingStyle.stroke
-      ..strokeWidth = 1.0;
-
-    final center = Offset(size.width / 2, size.height / 2);
-    canvas.drawCircle(center, size.width / 2, paint);
-  }
-
-  @override
-  bool shouldRepaint(covariant _GeometricCirclePainter oldDelegate) =>
-      oldDelegate.color != color;
-}
-
-/// L-shaped corner brackets (same as splash screen)
-class _CornerBracketsPainter extends CustomPainter {
-  final Color color;
-  final double strokeWidth;
-  final double armLength;
-  final double padding;
-
-  _CornerBracketsPainter({
-    required this.color,
-    required this.strokeWidth,
-    required this.armLength,
-    required this.padding,
+/// زر دائري صغير فوق الصورة
+class _RoundIcon extends StatelessWidget {
+  final IconData icon;
+  final String label;
+  final VoidCallback onTap;
+  const _RoundIcon({
+    super.key,
+    required this.icon,
+    required this.label,
+    required this.onTap,
   });
 
   @override
-  void paint(Canvas canvas, Size size) {
-    final paint = Paint()
-      ..color = color
-      ..strokeWidth = strokeWidth
-      ..style = PaintingStyle.stroke
-      ..strokeCap = StrokeCap.round;
+  Widget build(BuildContext context) {
+    return Semantics(
+      button: true,
+      label: label,
+      child: _PressScale(
+        onTap: onTap,
+        down: 0.9,
+        child: Container(
+          width: 40,
+          height: 40,
+          decoration: BoxDecoration(
+            shape: BoxShape.circle,
+            color: kInk.withValues(alpha: 0.6),
+            border: Border.all(color: kEmerald.withValues(alpha: 0.5)),
+          ),
+          child: Icon(icon, size: 20, color: kWhite),
+        ),
+      ),
+    );
+  }
+}
 
-    final double l = padding;
-    final double t = padding;
-    final double r = size.width - padding;
-    final double b = size.height - padding;
+// ── اتفاقية المستخدم ───────────────────────────────────────────
+class _AgreementSheet extends StatelessWidget {
+  const _AgreementSheet();
 
-    // Top-left
-    canvas.drawLine(Offset(l, t), Offset(l + armLength, t), paint);
-    canvas.drawLine(Offset(l, t), Offset(l, t + armLength), paint);
-    // Top-right
-    canvas.drawLine(Offset(r, t), Offset(r - armLength, t), paint);
-    canvas.drawLine(Offset(r, t), Offset(r, t + armLength), paint);
-    // Bottom-left
-    canvas.drawLine(Offset(l, b), Offset(l + armLength, b), paint);
-    canvas.drawLine(Offset(l, b), Offset(l, b - armLength), paint);
-    // Bottom-right
-    canvas.drawLine(Offset(r, b), Offset(r - armLength, b), paint);
-    canvas.drawLine(Offset(r, b), Offset(r, b - armLength), paint);
+  static Future<void> show(BuildContext context) {
+    return showModalBottomSheet<void>(
+      context: context,
+      isScrollControlled: true,
+      backgroundColor: Colors.transparent,
+      barrierColor: kInk.withValues(alpha: 0.7),
+      builder: (_) => const _AgreementSheet(),
+    );
   }
 
-  @override
-  bool shouldRepaint(covariant _CornerBracketsPainter old) =>
-      old.color != color || old.armLength != armLength;
-}
-
-// ─────────────────────────────────────────────
-// SUBSCRIPTION DIALOG (unchanged logic)
-// ─────────────────────────────────────────────
-class SubscriptionDialogContent extends StatefulWidget {
-  final VoidCallback onComplete;
-
-  const SubscriptionDialogContent({super.key, required this.onComplete});
-
-  @override
-  State<SubscriptionDialogContent> createState() =>
-      _SubscriptionDialogContentState();
-}
-
-class _SubscriptionDialogContentState
-    extends State<SubscriptionDialogContent> {
-  bool _telegramSubscribed = false;
-  bool _telegramMtcSubscribed = false;
-  bool _youtubeSubscribed = false;
-
-  bool _isTelegramLoading = false;
-  bool _isTelegramMtcLoading = false;
-  bool _isYoutubeLoading = false;
-
-  double _telegramProgress = 0.0;
-  double _telegramMtcProgress = 0.0;
-  double _youtubeProgress = 0.0;
-
-  Timer? _telegramTimer;
-  Timer? _telegramMtcTimer;
-  Timer? _youtubeTimer;
-
-  final List<String> _handshakeLogs = [
-    "[SYS] VIP Decryption Engine standby...",
-    "[SYS] Awaiting token activation verification...",
+  static List<(String, String)> get _sections => [
+    (
+      tr('1. ما هي الخدمة', '1. What the service is'),
+      tr(
+        '1.1. JoeX PRO («الخدمة») أداة ترفيهية على أندرويد.\n'
+            '1.2. الخانة التي تظهر في كل صف تختارها الخدمة عشوائيًا. وهي ليست توقعًا لنتيجة أي لعبة وليست نصيحة بالمراهنة.\n'
+            '1.3. «المنصة» هي الموقع المستقل التابع لطرف ثالث الذي تسجّل فيه عبر رابطنا. JoeX PRO ليس المنصة، ولا يحتفظ بأموالك، ولا يدير ألعابها.',
+        '1.1. JoeX PRO (“the Service”) is an entertainment tool for Android.\n'
+            '1.2. The cell shown in each row is picked by the Service at random. It is not a prediction of any game’s result and not betting advice.\n'
+            '1.3. The “Platform” is the independent third-party site you register on through our link. JoeX PRO is not the Platform, does not hold your money and does not run its games.',
+      ),
+    ),
+    (
+      tr('2. الشراكة', '2. Partnership'),
+      tr(
+        '2.1. يشارك JoeX PRO في برنامج الشركاء الخاص بالمنصة وقد يحصل منها على عمولة عن الحسابات المفتوحة عبر روابطنا. ولا يغيّر ذلك سعر أي شيء تدفعه.',
+        '2.1. JoeX PRO takes part in the Platform’s partner programme and may receive a commission for accounts opened through our links. This does not change the price of anything you pay.',
+      ),
+    ),
+    (
+      tr('3. المخاطر', '3. Risks'),
+      tr(
+        '3.1. ألعاب الحظ تحمل مستوى عاليًا من المخاطر وقد تؤدي إلى خسارة كل المال الذي تضعه. العب فقط بمال تستطيع تحمّل خسارته.\n'
+            '3.2. الاختيارات عشوائية. النتائج السابقة لا تضمن النتائج المستقبلية، ولا يوجد اختيار مضمون الصحة.\n'
+            '3.3. أنت وحدك تقرر هل تلعب وبكم، وأنت وحدك تتحمل النتيجة.',
+        '3.1. Games of chance carry a high risk and can lose you all the money you put in. Play only with money you can afford to lose.\n'
+            '3.2. The picks are random. Past results do not guarantee future ones, and no pick is guaranteed to be right.\n'
+            '3.3. You alone decide whether to play and how much, and you alone bear the result.',
+      ),
+    ),
+    (
+      tr('4. حسابك وبياناتك', '4. Your account and data'),
+      tr(
+        '4.1. رقم حسابك والكود محفوظان على جهازك فقط. لا نطلب أبدًا كلمة مرور حسابك على المنصة.\n'
+            '4.2. لا تشارك وصولك مع الآخرين.',
+        '4.1. Your account number and code are kept on your device only. We never ask for your Platform password.\n'
+            '4.2. Do not share your access with others.',
+      ),
+    ),
+    (
+      tr('5. الأهلية', '5. Eligibility'),
+      tr(
+        '5.1. يجب أن يكون عمرك 18 عامًا على الأقل وأن يسمح لك قانون بلدك بالمشاركة في ألعاب الحظ.',
+        '5.1. You must be at least 18 and allowed by the law of your country to take part in games of chance.',
+      ),
+    ),
+    (
+      tr('6. المسؤولية', '6. Liability'),
+      tr(
+        '6.1. تُقدَّم الخدمة «كما هي». وفي الحدود التي يسمح بها القانون، لا يتحمل JoeX PRO مسؤولية الخسائر أو تصرفات المنصة.',
+        '6.1. The Service is provided “as is”. To the extent the law allows, JoeX PRO is not liable for losses or for the Platform’s actions.',
+      ),
+    ),
+    (
+      tr('7. التواصل', '7. Contact'),
+      tr(
+        '7.1. الدعم على تليجرام: t.me/joe27',
+        '7.1. Support on Telegram: t.me/joe27',
+      ),
+    ),
   ];
-
-  final ScrollController _scrollController = ScrollController();
-
-  void _addLog(String msg) {
-    if (!mounted) return;
-    setState(() => _handshakeLogs.add(msg));
-    Future.delayed(const Duration(milliseconds: 50), () {
-      if (_scrollController.hasClients) {
-        _scrollController.animateTo(
-          _scrollController.position.maxScrollExtent,
-          duration: const Duration(milliseconds: 200),
-          curve: Curves.easeOut,
-        );
-      }
-    });
-  }
-
-  void _subscribeTelegram() async {
-    if (_telegramSubscribed || _isTelegramLoading) return;
-    final Uri url = Uri.parse("https://t.me/elostora_vip");
-    try {
-      await launchUrl(url, mode: LaunchMode.externalApplication);
-    } catch (_) {}
-    setState(() {
-      _isTelegramLoading = true;
-      _telegramProgress = 0.0;
-    });
-    _addLog("[SYS] Validating Telegram channel: t.me/elostora_vip...");
-    int step = 0;
-    _telegramTimer =
-        Timer.periodic(const Duration(milliseconds: 300), (timer) {
-      setState(() {
-        _telegramProgress += 0.2;
-        if (_telegramProgress >= 1.0) {
-          _telegramProgress = 1.0;
-          _telegramSubscribed = true;
-          _isTelegramLoading = false;
-          _telegramTimer?.cancel();
-          _addLog("[OK] Telegram bypass token validated successfully.");
-        } else {
-          step++;
-          if (step == 1) {
-            _addLog("[SECURE] Reading user registration signature...");
-          } else if (step == 2) {
-            _addLog("[PING] Syncing credentials packet to auth DB...");
-          }
-        }
-      });
-    });
-  }
-
-  void _subscribeTelegramMtc() async {
-    if (_telegramMtcSubscribed || _isTelegramMtcLoading) return;
-    final Uri url = Uri.parse("https://t.me/drk_mtc");
-    try {
-      await launchUrl(url, mode: LaunchMode.externalApplication);
-    } catch (_) {}
-    setState(() {
-      _isTelegramMtcLoading = true;
-      _telegramMtcProgress = 0.0;
-    });
-    _addLog("[SYS] Validating Telegram channel: t.me/drk_mtc...");
-    int step = 0;
-    _telegramMtcTimer =
-        Timer.periodic(const Duration(milliseconds: 300), (timer) {
-      setState(() {
-        _telegramMtcProgress += 0.2;
-        if (_telegramMtcProgress >= 1.0) {
-          _telegramMtcProgress = 1.0;
-          _telegramMtcSubscribed = true;
-          _isTelegramMtcLoading = false;
-          _telegramMtcTimer?.cancel();
-          _addLog("[OK] Telegram @drk_mtc bypass token validated successfully.");
-        } else {
-          step++;
-          if (step == 1) {
-            _addLog("[SECURE] Reading user registration signature...");
-          } else if (step == 2) {
-            _addLog("[PING] Syncing credentials packet to auth DB...");
-          }
-        }
-      });
-    });
-  }
-
-  void _subscribeYoutube() async {
-    if (_youtubeSubscribed || _isYoutubeLoading) return;
-    final Uri url = Uri.parse("https://youtube.com/@sir_joex1");
-    try {
-      await launchUrl(url, mode: LaunchMode.externalApplication);
-    } catch (_) {}
-    setState(() {
-      _isYoutubeLoading = true;
-      _youtubeProgress = 0.0;
-    });
-    _addLog("[SYS] Validating YouTube subscriber channel...");
-    int step = 0;
-    _youtubeTimer =
-        Timer.periodic(const Duration(milliseconds: 300), (timer) {
-      setState(() {
-        _youtubeProgress += 0.2;
-        if (_youtubeProgress >= 1.0) {
-          _youtubeProgress = 1.0;
-          _youtubeSubscribed = true;
-          _isYoutubeLoading = false;
-          _youtubeTimer?.cancel();
-          _addLog("[OK] YouTube verification token validated successfully.");
-        } else {
-          step++;
-          if (step == 1) {
-            _addLog("[SECURE] Scanning YouTube subscriber logs...");
-          } else if (step == 2) {
-            _addLog("[PING] Matching keys to master server core...");
-          }
-        }
-      });
-    });
-  }
-
-  @override
-  void dispose() {
-    _telegramTimer?.cancel();
-    _telegramMtcTimer?.cancel();
-    _youtubeTimer?.cancel();
-    _scrollController.dispose();
-    super.dispose();
-  }
 
   @override
   Widget build(BuildContext context) {
-    final bool validationPassed =
-        _telegramSubscribed && _telegramMtcSubscribed && _youtubeSubscribed;
+    final h = MediaQuery.of(context).size.height;
+    return Directionality(
+      textDirection: appDir,
+      child: Container(
+        constraints: BoxConstraints(maxHeight: h * 0.86),
+        decoration: BoxDecoration(
+          color: kCoal,
+          borderRadius: const BorderRadius.vertical(top: Radius.circular(24)),
+          border: Border(
+            top: BorderSide(color: kEmerald.withValues(alpha: 0.6)),
+          ),
+        ),
+        child: SafeArea(
+          top: false,
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.stretch,
+            children: [
+              const SizedBox(height: 10),
+              Center(
+                child: Container(
+                  width: 40,
+                  height: 4,
+                  decoration: BoxDecoration(
+                    color: kWhite.withValues(alpha: 0.25),
+                    borderRadius: BorderRadius.circular(2),
+                  ),
+                ),
+              ),
+              Padding(
+                padding: const EdgeInsets.fromLTRB(20, 14, 20, 4),
+                child: Text(
+                  tr(
+                    'JoeX PRO — اتفاقية المستخدم',
+                    'JoeX PRO — User Agreement',
+                  ),
+                  style: headText(kWhite, 18, height: 1.3),
+                ),
+              ),
+              Padding(
+                padding: const EdgeInsets.symmetric(horizontal: 20),
+                child: Text(
+                  tr('الإصدار: 24 نوفمبر 2026', 'Version: 24 November 2026'),
+                  style: bodyText(kMist, 11.5),
+                ),
+              ),
+              Flexible(
+                child: SingleChildScrollView(
+                  padding: const EdgeInsets.fromLTRB(20, 10, 20, 10),
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.stretch,
+                    children: [
+                      for (final s in _sections) ...[
+                        Text(
+                          s.$1,
+                          style: headText(kEmeraldPale, 14, height: 1.4),
+                        ),
+                        const SizedBox(height: 4),
+                        Text(
+                          s.$2,
+                          style: bodyText(kWhiteSoft, 12.5, height: 1.6),
+                        ),
+                        const SizedBox(height: 12),
+                      ],
+                    ],
+                  ),
+                ),
+              ),
+              Padding(
+                padding: const EdgeInsets.fromLTRB(20, 4, 20, 14),
+                child: PillButton(
+                  key: const ValueKey('agreement-done'),
+                  label: tr('العودة للتسجيل', 'Back to sign-up'),
+                  height: 50,
+                  onPressed: () => Navigator.of(context).pop(),
+                ),
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+}
 
-    return Center(
-      child: Material(
-        color: Colors.transparent,
-        child: ClipRRect(
-          borderRadius: BorderRadius.circular(16),
-          child: Container(
-            width: MediaQuery.of(context).size.width * 0.9,
-            padding: const EdgeInsets.all(24),
+/// حقل في صندوق: وسمه وايقونته في سطر صغير اعلاه، والقيمة تحته. الحافة
+/// تبيضّ مع التركيز وتحمر مع الخطأ، وعلامة صح فضية حين يكتمل
+class _BoxField extends StatelessWidget {
+  final String label;
+  final IconData icon;
+  final TextEditingController controller;
+  final FocusNode focusNode;
+  final String hint;
+  final String? error;
+  final bool done;
+  final int shake;
+  final TextInputAction action;
+  final TextInputType? keyboard;
+  final ValueChanged<String> onSubmitted;
+
+  const _BoxField({
+    super.key,
+    required this.label,
+    required this.icon,
+    required this.controller,
+    required this.focusNode,
+    required this.hint,
+    required this.error,
+    required this.done,
+    required this.shake,
+    required this.action,
+    required this.onSubmitted,
+    this.keyboard,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    final focused = focusNode.hasFocus;
+    final bad = error != null;
+    final edge = bad
+        ? kRose.withValues(alpha: 0.8)
+        : focused
+        ? kEmerald.withValues(alpha: 0.7)
+        : kWhite.withValues(alpha: 0.09);
+
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: [
+        Shake(
+          trigger: shake,
+          child: AnimatedContainer(
+            duration: Motion.medium,
+            curve: Motion.standard,
+            padding: const EdgeInsetsDirectional.fromSTEB(12, 9, 12, 2),
             decoration: BoxDecoration(
-              color: const Color(0xFF141418),
-              border:
-                  Border.all(color: const Color(0xFF2A2A35), width: 1.0),
+              color: kInk.withValues(alpha: focused ? 0.6 : 0.4),
+              borderRadius: BorderRadius.circular(16),
+              border: Border.all(color: edge, width: focused || bad ? 1.3 : 1),
             ),
             child: Column(
-              mainAxisSize: MainAxisSize.min,
               crossAxisAlignment: CrossAxisAlignment.stretch,
               children: [
                 Row(
-                  mainAxisAlignment: MainAxisAlignment.end,
                   children: [
-                    const Text(
-                      "تفعيل الترخيص الرقمي (إلزامي)",
-                      style: TextStyle(
-                        fontSize: 15,
-                        fontWeight: FontWeight.bold,
-                        color: _kPurple,
+                    Icon(
+                      icon,
+                      size: 14,
+                      color: bad ? kRose : (focused ? kEmerald : kWhiteFaint),
+                    ),
+                    const SizedBox(width: 6),
+                    Text(
+                      label,
+                      style: bodyText(
+                        focused ? kEmerald : kWhiteFaint,
+                        11,
+                        weight: FontWeight.w500,
+                        height: 1.3,
                       ),
                     ),
-                    const SizedBox(width: 10),
-                    const Icon(Icons.vpn_lock_outlined,
-                        color: _kPurple, size: 20),
+                    const Spacer(),
+                    AnimatedSwitcher(
+                      duration: Motion.medium,
+                      switchInCurve: Motion.overshoot,
+                      transitionBuilder: (child, a) =>
+                          ScaleTransition(scale: a, child: child),
+                      child: done && !bad
+                          ? Container(
+                              key: const ValueKey('ok'),
+                              width: 18,
+                              height: 18,
+                              decoration: BoxDecoration(
+                                shape: BoxShape.circle,
+                                gradient: LinearGradient(
+                                  colors: kEmeraldGradient,
+                                ),
+                              ),
+                              child: Icon(
+                                Icons.check_rounded,
+                                size: 12,
+                                color: kOnEmerald,
+                              ),
+                            )
+                          : const SizedBox(key: ValueKey('no'), height: 18),
+                    ),
                   ],
                 ),
-                const Divider(
-                    color: Color(0xFF2A2A35), height: 20, thickness: 1.0),
-                const Text(
-                  "لكي تتمكن من الدخول واستخدام السيرفر، يرجى إتمام المهام التالية بالترتيب لتفعيل حسابك الموحد:",
-                  style: TextStyle(color: Color(0xFF8E8E93), fontSize: 12),
-                  textAlign: TextAlign.right,
-                ),
-                const SizedBox(height: 16),
-                _buildTaskCard(
-                  icon: Icons.telegram_outlined,
-                  title: "اشترك بقناة التليجرام الرسمية",
-                  subtitle: "t.me/elostora_vip",
-                  progress: _telegramProgress,
-                  isLoading: _isTelegramLoading,
-                  isCompleted: _telegramSubscribed,
-                  onTap: _subscribeTelegram,
-                ),
-                const SizedBox(height: 10),
-                _buildTaskCard(
-                  icon: Icons.telegram_outlined,
-                  title: "اشترك بقناة التليجرام الاحتياطية",
-                  subtitle: "t.me/drk_mtc",
-                  progress: _telegramMtcProgress,
-                  isLoading: _isTelegramMtcLoading,
-                  isCompleted: _telegramMtcSubscribed,
-                  onTap: _subscribeTelegramMtc,
-                ),
-                const SizedBox(height: 10),
-                _buildTaskCard(
-                  icon: Icons.play_circle_outline,
-                  title: "اشترك بقناتنا على اليوتيوب",
-                  subtitle: "Sir JoeX YouTube Channel",
-                  progress: _youtubeProgress,
-                  isLoading: _isYoutubeLoading,
-                  isCompleted: _youtubeSubscribed,
-                  onTap: _subscribeYoutube,
-                ),
-                const SizedBox(height: 16),
-                ClipRRect(
-                  borderRadius: BorderRadius.circular(10),
-                  child: Container(
-                    height: 80,
-                    decoration: BoxDecoration(
-                      color: const Color(0xFF0A0A0A),
-                      border: Border.all(color: const Color(0xFF2A2A35)),
-                    ),
-                    child: ListView.builder(
-                      controller: _scrollController,
-                      padding: const EdgeInsets.all(8),
-                      itemCount: _handshakeLogs.length,
-                      itemBuilder: (context, index) {
-                        return Text(
-                          _handshakeLogs[index],
-                          style: const TextStyle(
-                            fontFamily: 'monospace',
-                            color: Color(0xFF5A5A6E),
-                            fontSize: 9.0,
-                          ),
-                        );
-                      },
-                    ),
+                TextField(
+                  controller: controller,
+                  focusNode: focusNode,
+                  textInputAction: action,
+                  keyboardType: keyboard,
+                  onSubmitted: onSubmitted,
+                  cursorColor: kEmerald,
+                  scrollPadding: const EdgeInsets.fromLTRB(20, 20, 20, 140),
+                  style: bodyText(
+                    kWhite,
+                    16,
+                    weight: FontWeight.w500,
+                    height: 1.3,
+                  ),
+                  decoration: InputDecoration(
+                    isDense: true,
+                    border: InputBorder.none,
+                    hintText: hint,
+                    hintStyle: bodyText(kWhiteFaint, 14, height: 1.3),
+                    contentPadding: const EdgeInsets.only(top: 6, bottom: 10),
                   ),
                 ),
-                const SizedBox(height: 20),
-                GestureDetector(
-                  onTap: validationPassed ? widget.onComplete : null,
-                  child: Container(
-                    height: 48,
-                    decoration: BoxDecoration(
-                      borderRadius: BorderRadius.circular(12),
-                      gradient: validationPassed
-                          ? const LinearGradient(
-                              colors: [_kPurpleDark, _kPurple],
-                              begin: Alignment.centerLeft,
-                              end: Alignment.centerRight,
-                            )
-                          : null,
-                      color: validationPassed ? null : const Color(0xFF141418),
-                      border: validationPassed
-                          ? null
-                          : Border.all(color: const Color(0xFF2A2A35)),
-                    ),
-                    child: Center(
-                      child: Text(
-                        "تحقق من التفعيل والدخول [OK]",
-                        style: TextStyle(
-                          color: validationPassed
-                              ? Colors.white
-                              : const Color(0xFF5A5A6E),
-                          fontSize: 14,
-                          fontWeight: FontWeight.bold,
+              ],
+            ),
+          ),
+        ),
+        AnimatedSize(
+          duration: Motion.medium,
+          curve: Motion.emphasized,
+          alignment: Alignment.topCenter,
+          child: error == null
+              ? const SizedBox(width: double.infinity)
+              : FaultLine(error!),
+        ),
+      ],
+    );
+  }
+}
+
+/// منصة في خانة مربعة داكنة: ايقونتها وحدها في الوسط. المختارة بحافة لونها
+/// ووهجه وعلامة صح في ركن البداية العلوي، كما في gpt
+class _PlatformTile extends StatelessWidget {
+  final int index;
+  final String asset;
+  final String badge;
+  final String name;
+
+  /// لون المنصة نفسها: حافتها ووهجها حين تُختار
+  final Color glow;
+  final bool selected;
+  final VoidCallback onTap;
+
+  const _PlatformTile({
+    super.key,
+    required this.index,
+    required this.asset,
+    required this.badge,
+    required this.name,
+    required this.glow,
+    required this.selected,
+    required this.onTap,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    // الاسم لقارئ الشاشة فقط: على الشاشة الايقونة وحدها
+    return Semantics(
+      label: name,
+      button: true,
+      selected: selected,
+      child: _PressScale(
+        onTap: onTap,
+        down: 0.94,
+        child: Stack(
+          clipBehavior: Clip.none,
+          children: [
+            AnimatedContainer(
+              duration: Motion.medium,
+              curve: Motion.standard,
+              padding: const EdgeInsets.all(12),
+              decoration: BoxDecoration(
+                color: selected
+                    ? glow.withValues(alpha: 0.12)
+                    : kWhite.withValues(alpha: 0.04),
+                borderRadius: BorderRadius.circular(16),
+                border: Border.all(
+                  color: selected ? glow : kWhite.withValues(alpha: 0.1),
+                  width: selected ? 2 : 1,
+                ),
+                boxShadow: selected
+                    ? [
+                        BoxShadow(
+                          color: glow.withValues(alpha: 0.4),
+                          blurRadius: 18,
+                        ),
+                      ]
+                    : null,
+              ),
+              child: Center(
+                child: SizedBox(
+                  width: 56,
+                  height: 56,
+                  child: ClipRRect(
+                    borderRadius: BorderRadius.circular(12),
+                    child: Image.asset(
+                      asset,
+                      fit: BoxFit.contain,
+                      gaplessPlayback: true,
+                      errorBuilder: (_, _, _) => Center(
+                        child: Text(
+                          badge,
+                          textDirection: TextDirection.ltr,
+                          style: markText(kWhiteSoft, 14),
                         ),
                       ),
                     ),
                   ),
                 ),
+              ),
+            ),
+            PositionedDirectional(
+              top: 4,
+              start: 4,
+              child: AnimatedScale(
+                duration: Motion.medium,
+                curve: Motion.overshoot,
+                scale: selected ? 1 : 0,
+                child: Container(
+                  key: selected ? ValueKey('platform-$index-on') : null,
+                  width: 18,
+                  height: 18,
+                  decoration: BoxDecoration(
+                    shape: BoxShape.circle,
+                    color: glow,
+                    border: Border.all(color: kWhite, width: 1.4),
+                  ),
+                  child: const Icon(
+                    Icons.check_rounded,
+                    size: 11,
+                    color: Colors.white,
+                  ),
+                ),
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+/// ايقونة في دائرة بلون المنصة داخل حلقة، مثل كارت «افتح حسابك»
+class _IconDisc extends StatelessWidget {
+  final IconData icon;
+  const _IconDisc({required this.icon});
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      width: 66,
+      height: 66,
+      padding: const EdgeInsets.all(5),
+      decoration: BoxDecoration(
+        shape: BoxShape.circle,
+        border: Border.all(color: kEmerald.withValues(alpha: 0.45), width: 1.4),
+      ),
+      child: Container(
+        decoration: BoxDecoration(
+          shape: BoxShape.circle,
+          color: kEmerald,
+          boxShadow: [
+            BoxShadow(color: kEmerald.withValues(alpha: 0.45), blurRadius: 16),
+          ],
+        ),
+        child: Icon(icon, color: kOnEmerald, size: 26),
+      ),
+    );
+  }
+}
+
+/// خانة طريقة التسجيل: ايقونة في دائرة، الاسم والوصف، ووسم صغير. المختارة
+/// بحافة لون المنصة ووهجه وعلامة صح
+class _MethodTile extends StatelessWidget {
+  final IconData icon;
+  final String title;
+  final String subtitle;
+  final String tag;
+  final bool selected;
+  final VoidCallback onTap;
+
+  const _MethodTile({
+    super.key,
+    required this.icon,
+    required this.title,
+    required this.subtitle,
+    required this.tag,
+    required this.selected,
+    required this.onTap,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    return Semantics(
+      button: true,
+      selected: selected,
+      child: _PressScale(
+        onTap: onTap,
+        down: 0.96,
+        child: AnimatedContainer(
+          duration: Motion.medium,
+          curve: Motion.standard,
+          padding: const EdgeInsets.fromLTRB(12, 12, 12, 12),
+          decoration: BoxDecoration(
+            color: selected
+                ? kEmerald.withValues(alpha: 0.12)
+                : kCoal.withValues(alpha: 0.86),
+            borderRadius: BorderRadius.circular(20),
+            border: Border.all(
+              color: selected ? kEmerald : kWhite.withValues(alpha: 0.1),
+              width: selected ? 2 : 1,
+            ),
+            boxShadow: selected
+                ? [
+                    BoxShadow(
+                      color: kEmerald.withValues(alpha: 0.3),
+                      blurRadius: 18,
+                    ),
+                  ]
+                : null,
+          ),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Row(
+                children: [
+                  Container(
+                    width: 40,
+                    height: 40,
+                    decoration: BoxDecoration(
+                      shape: BoxShape.circle,
+                      color: selected
+                          ? kEmerald
+                          : kEmerald.withValues(alpha: 0.12),
+                    ),
+                    child: Icon(
+                      icon,
+                      size: 21,
+                      color: selected ? kOnEmerald : kEmerald,
+                    ),
+                  ),
+                  const Spacer(),
+                  AnimatedScale(
+                    duration: Motion.medium,
+                    curve: Motion.overshoot,
+                    scale: selected ? 1 : 0,
+                    child: Container(
+                      width: 22,
+                      height: 22,
+                      decoration: BoxDecoration(
+                        shape: BoxShape.circle,
+                        color: kEmerald,
+                      ),
+                      child: Icon(
+                        Icons.check_rounded,
+                        size: 15,
+                        color: kOnEmerald,
+                      ),
+                    ),
+                  ),
+                ],
+              ),
+              const SizedBox(height: 10),
+              Text(title, style: headText(kWhite, 16, height: 1.3)),
+              const SizedBox(height: 2),
+              Text(subtitle, style: bodyText(kMist, 12, height: 1.4)),
+              const SizedBox(height: 8),
+              Container(
+                padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
+                decoration: BoxDecoration(
+                  color: kWhite.withValues(alpha: 0.06),
+                  borderRadius: BorderRadius.circular(99),
+                ),
+                child: Text(
+                  tag,
+                  style: bodyText(
+                    selected ? kEmeraldPale : kWhiteFaint,
+                    10.5,
+                    weight: FontWeight.w700,
+                    height: 1.2,
+                  ),
+                ),
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+/// كارت رمز الترويج: الرمز كبير وبجواره زر نسخ
+class _PromoChip extends StatelessWidget {
+  final Future<void> Function() onCopy;
+  const _PromoChip({required this.onCopy});
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      padding: const EdgeInsetsDirectional.fromSTEB(16, 12, 10, 12),
+      decoration: BoxDecoration(
+        borderRadius: BorderRadius.circular(20),
+        gradient: LinearGradient(
+          begin: AlignmentDirectional.centerStart,
+          end: AlignmentDirectional.centerEnd,
+          colors: [
+            kEmerald.withValues(alpha: 0.16),
+            kEmerald.withValues(alpha: 0.05),
+          ],
+        ),
+        border: Border.all(color: kEmerald.withValues(alpha: 0.45)),
+      ),
+      child: Row(
+        children: [
+          Icon(Icons.local_offer_rounded, size: 20, color: kEmerald),
+          const SizedBox(width: 10),
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                Text(
+                  tr('رمز الترويج', 'Promo code'),
+                  style: bodyText(kMist, 11.5, height: 1.2),
+                ),
+                Text(
+                  kPromoCode,
+                  textDirection: TextDirection.ltr,
+                  // بخط عادي: خط الاسم يكتب الصغيرة كبيرة فيُكتب الرمز خطأ
+                  style: bodyText(
+                    kWhite,
+                    22,
+                    weight: FontWeight.w700,
+                    height: 1.25,
+                  ).copyWith(letterSpacing: 1.2),
+                ),
               ],
+            ),
+          ),
+          _PressScale(
+            key: const ValueKey('promo-copy'),
+            onTap: onCopy,
+            down: 0.94,
+            child: Container(
+              height: 40,
+              padding: const EdgeInsets.symmetric(horizontal: 14),
+              decoration: BoxDecoration(
+                color: kEmerald,
+                borderRadius: BorderRadius.circular(14),
+              ),
+              child: Row(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  Icon(Icons.copy_rounded, size: 16, color: kOnEmerald),
+                  const SizedBox(width: 6),
+                  Text(
+                    tr('نسخ', 'Copy'),
+                    style: bodyText(
+                      kOnEmerald,
+                      13,
+                      weight: FontWeight.w700,
+                      height: 1.2,
+                    ),
+                  ),
+                ],
+              ),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+/// خطوات على خط زمني: رقم في دائرة بحلقة لون المنصة، وخط ينزل منه الى
+/// التالي، وبجواره العنوان ووصف قصير
+class _Timeline extends StatelessWidget {
+  final List<(String, String)> items;
+
+  /// ايقونات بدل الارقام: لخطوات تمهيدية لا تُعد مع خطوات الفورم
+  final List<IconData>? icons;
+  const _Timeline({required this.items, this.icons});
+
+  @override
+  Widget build(BuildContext context) {
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: [
+        for (var i = 0; i < items.length; i++)
+          IntrinsicHeight(
+            child: Row(
+              crossAxisAlignment: CrossAxisAlignment.stretch,
+              children: [
+                SizedBox(
+                  width: 34,
+                  child: Column(
+                    children: [
+                      Container(
+                        width: 34,
+                        height: 34,
+                        alignment: Alignment.center,
+                        decoration: BoxDecoration(
+                          shape: BoxShape.circle,
+                          color: kInk.withValues(alpha: 0.6),
+                          border: Border.all(
+                            color: kEmerald.withValues(alpha: 0.75),
+                            width: 1.6,
+                          ),
+                        ),
+                        child: icons != null
+                            ? Icon(icons![i], size: 17, color: kEmeraldPale)
+                            : Text(
+                                '${i + 1}',
+                                textDirection: TextDirection.ltr,
+                                style: bodyText(
+                                  kEmeraldPale,
+                                  14,
+                                  weight: FontWeight.w700,
+                                  height: 1,
+                                ),
+                              ),
+                      ),
+                      if (i < items.length - 1)
+                        Expanded(
+                          child: Container(
+                            width: 1.6,
+                            margin: const EdgeInsets.symmetric(vertical: 4),
+                            color: kEmerald.withValues(alpha: 0.3),
+                          ),
+                        ),
+                    ],
+                  ),
+                ),
+                const SizedBox(width: 12),
+                Expanded(
+                  child: Padding(
+                    padding: EdgeInsets.only(
+                      top: 5,
+                      bottom: i < items.length - 1 ? 16 : 0,
+                    ),
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        Text(
+                          items[i].$1,
+                          style: headText(kWhite, 14.5, height: 1.35),
+                        ),
+                        const SizedBox(height: 2),
+                        Text(
+                          items[i].$2,
+                          style: bodyText(kMist, 12.5, height: 1.45),
+                        ),
+                      ],
+                    ),
+                  ),
+                ),
+              ],
+            ),
+          ),
+      ],
+    );
+  }
+}
+
+/// زر ثانوي بعرض كامل: حافة لون المنصة ونصه بلونها على خلفية داكنة
+class _OutlineBar extends StatelessWidget {
+  final String label;
+  final VoidCallback onTap;
+  const _OutlineBar({super.key, required this.label, required this.onTap});
+
+  @override
+  Widget build(BuildContext context) {
+    return _PressScale(
+      onTap: onTap,
+      down: 0.98,
+      child: Container(
+        height: 54,
+        alignment: Alignment.center,
+        padding: const EdgeInsets.symmetric(horizontal: 14),
+        decoration: BoxDecoration(
+          color: kInk.withValues(alpha: 0.7),
+          borderRadius: BorderRadius.circular(18),
+          border: Border.all(
+            color: kEmerald.withValues(alpha: 0.6),
+            width: 1.4,
+          ),
+        ),
+        child: Text(
+          label,
+          textAlign: TextAlign.center,
+          maxLines: 1,
+          overflow: TextOverflow.ellipsis,
+          style: bodyText(kEmeraldPale, 15, weight: FontWeight.w700),
+        ),
+      ),
+    );
+  }
+}
+
+/// ضغطة تنكمش ثم تعود بارتداد خفيف
+class _PressScale extends StatefulWidget {
+  final VoidCallback? onTap;
+  final Widget child;
+  final double down;
+  const _PressScale({
+    super.key,
+    required this.child,
+    this.onTap,
+    this.down = 0.96,
+  });
+
+  @override
+  State<_PressScale> createState() => _PressScaleState();
+}
+
+class _PressScaleState extends State<_PressScale> {
+  bool _pressed = false;
+
+  void _set(bool v) {
+    if (_pressed != v) setState(() => _pressed = v);
+  }
+
+  @override
+  Widget build(BuildContext context) => GestureDetector(
+    onTapDown: widget.onTap == null ? null : (_) => _set(true),
+    onTapUp: widget.onTap == null ? null : (_) => _set(false),
+    onTapCancel: () => _set(false),
+    onTap: widget.onTap,
+    behavior: HitTestBehavior.opaque,
+    child: AnimatedScale(
+      duration: _pressed ? Motion.fast : Motion.medium,
+      curve: _pressed ? Motion.standard : Motion.overshoot,
+      scale: _pressed ? widget.down : 1,
+      child: widget.child,
+    ),
+  );
+}
+
+// ═══════════════════════════════════════════════════════════════
+// الاشتراك الاجباري — بطاقة مخملية يعلوها وسام الشعار نصفه خارجها، وحلقته
+// تمتلئ بالذهب مع كل شرط. الشروط الثلاثة على خيط عمودي من العملات، لكل منها
+// اسمه ومعرّفه وزره، ثم التحقق.
+// ═══════════════════════════════════════════════════════════════
+class MandatorySubscriptionDialog extends StatefulWidget {
+  final VoidCallback onSubscriptionVerified;
+
+  const MandatorySubscriptionDialog({
+    super.key,
+    required this.onSubscriptionVerified,
+  });
+
+  /// تفتح النافذة في الوسط: تظهر وتكبر قليلا بينما تغيم الشاشة خلفها
+  static Future<void> show(
+    BuildContext context, {
+    required VoidCallback onSubscriptionVerified,
+  }) {
+    return showGeneralDialog<void>(
+      context: context,
+      barrierDismissible: false,
+      barrierLabel: 'SubscriptionDialog',
+      barrierColor: kInk.withValues(alpha: 0.72),
+      transitionDuration: const Duration(milliseconds: 420),
+      pageBuilder: (c, _, _) => MandatorySubscriptionDialog(
+        onSubscriptionVerified: onSubscriptionVerified,
+      ),
+      transitionBuilder: (c, a, _, child) {
+        final v = CurvedAnimation(
+          parent: a,
+          curve: Motion.emphasized,
+          reverseCurve: Motion.accelerate,
+        );
+        return AnimatedBuilder(
+          animation: v,
+          builder: (context, inner) => BackdropFilter(
+            filter: ui.ImageFilter.blur(
+              sigmaX: 10 * v.value,
+              sigmaY: 10 * v.value,
+            ),
+            child: inner,
+          ),
+          child: FadeTransition(
+            opacity: v,
+            child: ScaleTransition(
+              scale: Tween<double>(begin: 0.92, end: 1).animate(v),
+              child: child,
+            ),
+          ),
+        );
+      },
+    );
+  }
+
+  @override
+  State<MandatorySubscriptionDialog> createState() =>
+      _MandatorySubscriptionDialogState();
+}
+
+class _MandatorySubscriptionDialogState
+    extends State<MandatorySubscriptionDialog>
+    with SingleTickerProviderStateMixin {
+  late final AnimationController _spin = AnimationController(
+    vsync: this,
+    duration: const Duration(seconds: 9),
+  );
+
+  bool _clickedYoutube = false;
+  bool _clickedTelegram = false;
+  bool _clickedVideo = false;
+  bool _isCheckingVideo = false;
+  DynamicActionConfig _actionConfig = DynamicActionConfig.defaultConfig();
+  String? _errorMsg;
+  int _errorShake = 0;
+
+  @override
+  void initState() {
+    super.initState();
+    _loadDynamicConfig();
+  }
+
+  @override
+  void didChangeDependencies() {
+    super.didChangeDependencies();
+    if (motionAllowed(context) && !_spin.isAnimating) _spin.repeat();
+  }
+
+  @override
+  void dispose() {
+    _spin.dispose();
+    super.dispose();
+  }
+
+  Future<void> _loadDynamicConfig() async {
+    final cached = await DynamicLinkService.getCachedConfig();
+    if (mounted) setState(() => _actionConfig = cached);
+    final latest = await DynamicLinkService.fetchLatestConfig();
+    if (mounted) setState(() => _actionConfig = latest);
+  }
+
+  Future<void> _openChannelUrl(String url, String key) async {
+    setState(() {
+      if (key == 'yt') _clickedYoutube = true;
+      if (key == 'tg') _clickedTelegram = true;
+      _errorMsg = null;
+    });
+    await openUrl(url);
+  }
+
+  Future<void> _handleThirdAction(String url) async {
+    if (_isCheckingVideo) return;
+    if (_clickedVideo) {
+      await openUrl(url);
+      return;
+    }
+
+    setState(() {
+      _isCheckingVideo = true;
+      _errorMsg = null;
+    });
+
+    await openUrl(url);
+    await Future.delayed(const Duration(seconds: 5));
+
+    if (mounted) {
+      setState(() {
+        _isCheckingVideo = false;
+        _clickedVideo = true;
+        _errorMsg = null;
+      });
+    }
+  }
+
+  void _verify() {
+    if (_isCheckingVideo) {
+      setState(() {
+        _errorMsg = tr(
+          'جاري التحقق من التفاعل... يرجى الانتظار ⏳',
+          'Checking your action... please wait ⏳',
+        );
+        _errorShake++;
+      });
+      return;
+    }
+    if (!_clickedYoutube || !_clickedTelegram || !_clickedVideo) {
+      setState(() {
+        _errorMsg = tr(
+          'يرجى إكمال جميع الشروط الـ 3 أولاً',
+          'Please complete all 3 steps first',
+        );
+        _errorShake++;
+      });
+      return;
+    }
+    Navigator.of(context).pop();
+    widget.onSubscriptionVerified();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final steps = [_clickedYoutube, _clickedTelegram, _clickedVideo];
+    final done = steps.where((s) => s).length;
+    final complete = done == 3;
+    final pending = steps.indexWhere((s) => !s);
+    const medal = 108.0;
+
+    return Center(
+      child: SingleChildScrollView(
+        padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 24),
+        child: ConstrainedBox(
+          constraints: const BoxConstraints(maxWidth: 420),
+          child: Material(
+            type: MaterialType.transparency,
+            child: Directionality(
+              textDirection: appDir,
+              child: Stack(
+                clipBehavior: Clip.none,
+                children: [
+                  Padding(
+                    padding: const EdgeInsets.only(top: medal / 2),
+                    child: VelvetCard(
+                      glow: true,
+                      padding: const EdgeInsets.fromLTRB(
+                        18,
+                        medal / 2 + 12,
+                        18,
+                        18,
+                      ),
+                      child: StaggerIn(
+                        duration: const Duration(milliseconds: 820),
+                        children: [
+                          Text(
+                            tr('اشتراك إجباري', 'Required subscription'),
+                            textAlign: TextAlign.center,
+                            style: headText(kWhite, 24, height: 1.25),
+                          ),
+                          const SizedBox(height: 4),
+                          Text(
+                            tr(
+                              'يشترط إكمال الشروط الـ 3 للمتابعة وتفعيل الأداة',
+                              'Complete the 3 steps to continue and activate the tool',
+                            ),
+                            textAlign: TextAlign.center,
+                            style: bodyText(kMist, 12),
+                          ),
+                          const SizedBox(height: 12),
+                          const Center(child: GoldRule(width: 150)),
+                          const SizedBox(height: 16),
+                          _condition(
+                            index: 0,
+                            title: tr('قناة اليوتيوب', 'YouTube channel'),
+                            subtitle: kYoutubeHandle,
+                            icon: Icons.play_arrow_rounded,
+                            isClicked: _clickedYoutube,
+                            active: pending == 0,
+                            onTap: () => _openChannelUrl(kYoutubeUrl, 'yt'),
+                          ),
+                          _condition(
+                            index: 1,
+                            title: tr('قناة التليجرام', 'Telegram channel'),
+                            subtitle: kTelegramHandle,
+                            icon: Icons.telegram,
+                            isClicked: _clickedTelegram,
+                            active: pending == 1,
+                            onTap: () =>
+                                _openChannelUrl(kTelegramUrl, 'tg'),
+                          ),
+                          _condition(
+                            index: 2,
+                            last: true,
+                            title: _actionConfig.displayTitle,
+                            subtitle: _actionConfig.displaySubtitle,
+                            icon: _actionConfig.icon,
+                            isClicked: _clickedVideo,
+                            isLoading: _isCheckingVideo,
+                            active: pending == 2,
+                            defaultButtonText:
+                                _actionConfig.actionType == 'comment'
+                                ? tr('تعليق', 'Comment')
+                                : _actionConfig.actionType == 'subscribe'
+                                ? tr('اشتراك', 'Subscribe')
+                                : tr('لايك', 'Like'),
+                            completedButtonText: tr(
+                              'تم التحقق ✓',
+                              'Verified ✓',
+                            ),
+                            loadingButtonText: tr(
+                              'جاري التحقق...',
+                              'Checking...',
+                            ),
+                            onTap: () => _handleThirdAction(_actionConfig.url),
+                          ),
+                          AnimatedSize(
+                            duration: Motion.medium,
+                            curve: Motion.emphasized,
+                            alignment: Alignment.topCenter,
+                            child: _errorMsg == null
+                                ? const SizedBox(width: double.infinity)
+                                : Shake(
+                                    trigger: _errorShake,
+                                    child: FaultLine(_errorMsg!),
+                                  ),
+                          ),
+                          const SizedBox(height: 16),
+                          PillButton(
+                            label: tr('تحقق ومتابعة', 'Verify and continue'),
+                            icon: complete
+                                ? Icons.check_rounded
+                                : Icons.done_all_rounded,
+                            height: 54,
+                            attention: complete,
+                            onPressed: _verify,
+                          ),
+                        ],
+                      ),
+                    ),
+                  ),
+                  // الوسام نصفه فوق البطاقة، وحلقته تمتلئ مع الشروط
+                  Positioned(
+                    top: 0,
+                    left: 0,
+                    right: 0,
+                    child: Center(
+                      child: SizedBox.square(
+                        dimension: medal,
+                        child: TweenAnimationBuilder<double>(
+                          tween: Tween(end: done / 3),
+                          duration: Motion.slow,
+                          curve: Motion.emphasized,
+                          builder: (context, v, child) => AnimatedBuilder(
+                            animation: _spin,
+                            builder: (context, c) => CustomPaint(
+                              painter: MedallionPainter(
+                                draw: 1,
+                                spin: _spin.value,
+                                progress: v,
+                                inner: medal * 0.33,
+                              ),
+                              child: c,
+                            ),
+                            child: child,
+                          ),
+                          child: Center(
+                            child: DecoratedBox(
+                              decoration: BoxDecoration(
+                                shape: BoxShape.circle,
+                                color: kInk,
+                                boxShadow: [
+                                  BoxShadow(
+                                    color: kJade.withValues(alpha: 0.5),
+                                    blurRadius: 22,
+                                  ),
+                                ],
+                              ),
+                              child: const BrandLogo(size: medal * 0.66),
+                            ),
+                          ),
+                        ),
+                      ),
+                    ),
+                  ),
+                ],
+              ),
             ),
           ),
         ),
@@ -1506,65 +2903,180 @@ class _SubscriptionDialogContentState
     );
   }
 
-  Widget _buildTaskCard({
-    required IconData icon,
+  /// شرط على الخيط: عملة على اليمين وخيط ينزل منها الى التالي، ثم شريحة
+  /// فيها الاسم ومعرّفه وزر في كبسولة تذهب عند الاكتمال
+  Widget _condition({
+    required int index,
     required String title,
     required String subtitle,
-    required double progress,
-    required bool isLoading,
-    required bool isCompleted,
+    required IconData icon,
+    required bool isClicked,
+    required bool active,
     required VoidCallback onTap,
+    bool last = false,
+    bool isLoading = false,
+    String? defaultButtonText,
+    String? completedButtonText,
+    String? loadingButtonText,
   }) {
-    return GestureDetector(
-      onTap: onTap,
-      child: ClipRRect(
-        borderRadius: BorderRadius.circular(12),
-        child: Container(
-          padding: const EdgeInsets.all(12),
-          decoration: BoxDecoration(
-            color: const Color(0xFF0A0A0A),
-            border: Border.all(
-              color: isCompleted ? _kPurple : const Color(0xFF2A2A35),
-              width: 1.0,
+    defaultButtonText ??= tr('انضمام', 'Join');
+    completedButtonText ??= tr('تم الانضمام', 'Joined');
+    loadingButtonText ??= tr('جاري التحقق...', 'Checking...');
+    final isDone = isClicked && !isLoading;
+    final handle = subtitle.startsWith('@');
+    final actionLabel = isLoading
+        ? loadingButtonText
+        : isDone
+        ? completedButtonText
+        : defaultButtonText;
+
+    return IntrinsicHeight(
+      child: Row(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          SizedBox(
+            width: 36,
+            child: Column(
+              children: [
+                const SizedBox(height: 10),
+                Coin(
+                  size: 34,
+                  active: active || isLoading,
+                  done: isDone,
+                  label: isLoading
+                      ? SizedBox.square(
+                          dimension: 14,
+                          child: CircularProgressIndicator(
+                            strokeWidth: 1.8,
+                            color: kEmerald,
+                          ),
+                        )
+                      : Icon(
+                          isDone ? Icons.check_rounded : icon,
+                          size: 15,
+                          color: Coin.ink(
+                            active: active || isLoading,
+                            done: isDone,
+                          ),
+                        ),
+                ),
+                if (!last)
+                  Expanded(
+                    child: AnimatedContainer(
+                      duration: Motion.slow,
+                      width: 2,
+                      margin: const EdgeInsets.symmetric(vertical: 4),
+                      decoration: BoxDecoration(
+                        borderRadius: BorderRadius.circular(1),
+                        color: isDone
+                            ? kEmerald.withValues(alpha: 0.8)
+                            : kWhite.withValues(alpha: 0.14),
+                      ),
+                    ),
+                  ),
+              ],
             ),
           ),
-          child: Row(
-            children: [
-              if (isCompleted)
-                const Icon(Icons.check_circle, color: _kPurple, size: 22)
-              else if (isLoading)
-                SizedBox(
-                  width: 18,
-                  height: 18,
-                  child: CircularProgressIndicator(
-                    strokeWidth: 2.0,
-                    value: progress,
-                    valueColor: const AlwaysStoppedAnimation<Color>(_kPurple),
+          const SizedBox(width: 10),
+          Expanded(
+            child: Padding(
+              padding: EdgeInsets.only(bottom: last ? 0 : 10),
+              child: _PressScale(
+                onTap: isLoading ? null : onTap,
+                down: 0.975,
+                child: AnimatedContainer(
+                  duration: Motion.medium,
+                  padding: const EdgeInsets.fromLTRB(12, 10, 12, 10),
+                  decoration: BoxDecoration(
+                    color: isDone
+                        ? kEmerald.withValues(alpha: 0.08)
+                        : kInk.withValues(alpha: 0.45),
+                    borderRadius: BorderRadius.circular(18),
+                    border: Border.all(
+                      color: isDone
+                          ? kEmerald.withValues(alpha: 0.6)
+                          : (active
+                                ? kJade.withValues(alpha: 0.7)
+                                : kWhiteLine),
+                    ),
                   ),
-                )
-              else
-                const Icon(Icons.arrow_back_ios_new,
-                    color: Color(0xFF5A5A6E), size: 12),
-              const Spacer(),
-              Column(
-                crossAxisAlignment: CrossAxisAlignment.end,
-                children: [
-                  Text(title,
-                      style: const TextStyle(
-                          color: Colors.white,
-                          fontSize: 11.5,
-                          fontWeight: FontWeight.bold)),
-                  const SizedBox(height: 3),
-                  Text(subtitle,
-                      style: const TextStyle(
-                          color: Color(0xFF5A5A6E), fontSize: 9.0)),
-                ],
+                  child: Row(
+                    children: [
+                      Expanded(
+                        child: Column(
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          mainAxisSize: MainAxisSize.min,
+                          children: [
+                            Text(
+                              title,
+                              maxLines: 1,
+                              overflow: TextOverflow.ellipsis,
+                              style: headText(kWhite, 14, height: 1.35),
+                            ),
+                            if (subtitle.isNotEmpty)
+                              Text(
+                                subtitle,
+                                maxLines: 1,
+                                overflow: TextOverflow.ellipsis,
+                                textDirection: handle
+                                    ? TextDirection.ltr
+                                    : appDir,
+                                style: bodyText(
+                                  kWhiteFaint,
+                                  handle ? 11 : 10.5,
+                                  weight: handle
+                                      ? FontWeight.w500
+                                      : FontWeight.w400,
+                                  height: 1.35,
+                                ),
+                              ),
+                          ],
+                        ),
+                      ),
+                      const SizedBox(width: 8),
+                      AnimatedContainer(
+                        duration: Motion.medium,
+                        padding: const EdgeInsets.symmetric(
+                          horizontal: 12,
+                          vertical: 5,
+                        ),
+                        decoration: BoxDecoration(
+                          borderRadius: BorderRadius.circular(99),
+                          gradient: isDone
+                              ? LinearGradient(colors: kEmeraldGradient)
+                              : null,
+                          border: Border.all(
+                            color: isLoading
+                                ? kWhiteLine
+                                : kEmerald.withValues(alpha: isDone ? 0 : 0.75),
+                          ),
+                        ),
+                        child: ClipRect(
+                          child: AnimatedSwitcher(
+                            duration: Motion.swap,
+                            transitionBuilder: slideSwapTransition,
+                            child: Text(
+                              actionLabel,
+                              key: ValueKey(actionLabel),
+                              style: bodyText(
+                                isLoading
+                                    ? kWhiteFaint
+                                    : (isDone ? kOnEmerald : kEmerald),
+                                11,
+                                weight: FontWeight.w700,
+                                height: 1.3,
+                              ),
+                            ),
+                          ),
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
               ),
-              const SizedBox(width: 12),
-              Icon(icon, color: _kPurple, size: 24),
-            ],
+            ),
           ),
-        ),
+        ],
       ),
     );
   }
